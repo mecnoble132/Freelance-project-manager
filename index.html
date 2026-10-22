@@ -85,6 +85,8 @@ button.row:hover,a.row:hover{background:color-mix(in srgb,var(--accent) 5%,trans
 .back{background:none;border:none;color:var(--accent);font:inherit;font-weight:600;cursor:pointer;padding:4px 0;align-self:flex-start;text-decoration:none}
 .actions{display:flex;gap:8px;flex-wrap:wrap}
 .err{color:var(--out);font-size:14px}
+.notice{background:var(--panel);border-left:3px solid var(--accent);border-radius:10px;padding:10px 14px;font-size:14px;color:var(--muted);box-shadow:var(--shadow)}
+.notice .linkbtn{font-size:14px;font-weight:600}
 .login{width:100%;max-width:380px;margin:10vh auto 0;background:var(--panel);border-radius:18px;box-shadow:var(--shadow);padding:24px;display:flex;flex-direction:column;gap:14px}
 .login h1{font-size:26px}
 .linkbtn{background:none;border:none;color:var(--accent);font:inherit;font-size:13px;cursor:pointer;padding:0;align-self:flex-start}
@@ -126,7 +128,7 @@ button.row:hover,a.row:hover{background:color-mix(in srgb,var(--accent) 5%,trans
 .legend{display:flex;gap:14px;font-size:13px;color:var(--muted);flex-wrap:wrap}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
-.chart{position:relative;min-height:240px;border-radius:8px}
+.chart{position:relative;border-radius:8px}
 .chart svg{display:block;overflow:visible}
 .chart .grid{stroke:var(--line);stroke-width:1}
 .chart .base{stroke:var(--muted);stroke-width:1}
@@ -188,7 +190,7 @@ textarea{resize:vertical;min-height:90px}
 <script>
 (function(){
 const S = { clients:[], projects:[], txns:[], view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
-  period:pref('period','12m'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
+  period:pref('period','all'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
 function pref(k,d){ try{ return localStorage.getItem('ledger.'+k) || d; }catch(e){ return d; } }
@@ -204,6 +206,7 @@ const fmtDate = d => d ? parseD(d).toLocaleDateString('en-IN',{day:'numeric',mon
 function h(tag, attrs, ...kids){ const el=document.createElement(tag); if(attrs) for(const k in attrs){ const v=attrs[k]; if(v==null||v===false) continue; if(k==='class') el.className=v; else if(k.startsWith('on')) el.addEventListener(k.slice(2),v); else el.setAttribute(k,v===true?'':v);} kids.flat().forEach(c=>{ if(c==null||c===false) return; el.appendChild(typeof c==='string'||typeof c==='number'?document.createTextNode(String(c)):c); }); return el; }
 function svg(tag, attrs, ...kids){ const el=document.createElementNS('http://www.w3.org/2000/svg',tag); for(const k in attrs||{}) if(attrs[k]!=null) el.setAttribute(k,attrs[k]); kids.flat().forEach(c=>{ if(c!=null) el.appendChild(typeof c==='string'?document.createTextNode(c):c); }); return el; }
 const canWrite = () => !!db;
+const add = (el,...kids) => el.append(...kids.filter(k=>k!=null)); // like append, but skips the nulls optional sections return
 
 // Links are typed by hand, so only http(s) addresses are ever stored or rendered.
 function cleanUrl(u){ u=(u||'').trim(); if(!u) return ''; if(!/^[a-z][a-z0-9+.-]*:/i.test(u)) u='https://'+u; try{ const x=new URL(u); return /^https?:$/.test(x.protocol) ? x.href : null; }catch(e){ return null; } }
@@ -213,6 +216,8 @@ const STATUSES = [['lead','Lead'],['active','In progress'],['paused','On hold'],
 const statusLabel = s => (STATUSES.find(x=>x[0]===s)||STATUSES[1])[1];
 const badge = s => h('span',{class:'badge '+s},statusLabel(s));
 const CATEGORIES = ['Domain','Hosting','Software & plugins','Design assets','Contractor','Ads & marketing','Travel','Other'];
+// Expenses logged before categories existed only have a note, like "Domain"; use it when it names a category.
+const guessCategory = note => CATEGORIES.find(c=>c.toLowerCase()===String(note||'').trim().toLowerCase()) || '';
 
 function sumOf(txns){ let i=0,o=0; txns.forEach(t=>{ if(t.type==='out') o+=Number(t.amount)||0; else i+=Number(t.amount)||0; }); return {earned:i, spent:o, profit:i-o}; }
 const clientOf = id => S.clients.find(c=>c.id===id);
@@ -278,10 +283,11 @@ function renderHome(v){
   const nLeads = S.projects.filter(x=>x.status==='lead').length;
   const pills = h('div',{class:'pills',role:'group','aria-label':'Time period'},
     PERIODS.map(([k,l])=>h('button',{type:'button','aria-pressed':String(p===k),onclick:()=>{S.period=k;setPref('period',k);render();}},l)));
-  v.append(
+  add(v,
     h('div',{class:'page-head'},h('h1',null,'Dashboard'),
       canWrite() ? h('div',{class:'actions'},h('button',{class:'btn',onclick:()=>openMoneySheet()},'+ Add money'),h('button',{class:'btn primary',onclick:()=>openProjectSheet()},'+ New project')) : null),
     h('div',{class:'filters'},pills),
+    undatedNote(),
     h('div',{class:'kpis'},
       kpi('Revenue', rs(all.earned), 'Money in', 'in'),
       kpi('Spending', rs(all.spent), 'Money out', 'out'),
@@ -299,10 +305,12 @@ function renderHome(v){
   const table = h('details',{class:'tbl'},h('summary',null,'Show as table'),h('div',{class:'tblwrap'},h('table',null,
     h('thead',null,h('tr',null,h('th',null,p==='month'?'Day':'Month'),h('th',null,'Money in'),h('th',null,'Money out'),h('th',null,'Profit'))),
     h('tbody',null,buckets.slice().reverse().map(b=>h('tr',null,h('td',null,b.long),h('td',{class:'num'},rs(b.in)),h('td',{class:'num'},rs(b.out)),h('td',{class:'num'},signed(b.in-b.out))))))));
+  const hasChart = buckets.some(b=>b.in||b.out);
   const chartCard = h('div',{class:'card'},
     h('div',{class:'card-head'},h('h2',null,'Money in and out'),
       h('div',{class:'legend'},h('span',null,h('i',{style:'background:var(--c-in)'}),'Money in'),h('span',null,h('i',{style:'background:var(--c-out)'}),'Money out'))),
-    chartBox, table);
+    chartBox, hasChart ? table : null,
+    S.txns.some(t=>!t.date) && p==='all' && S.txns.some(t=>t.date) ? h('div',{class:'hint'},'Entries with no date aren’t on the chart, but are counted in the totals above.') : null);
 
   const top = stats.map(s=>({...s, ...sumOf(tx.filter(t=>t.projectId===s.p.id))})).filter(s=>s.earned||s.spent).sort((a,b)=>b.profit-a.profit).slice(0,6);
   const topCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Most profitable projects'),h('span',{class:'sub'},periodLabel(p))));
@@ -334,6 +342,13 @@ function renderHome(v){
   drawMoneyChart(chartBox, buckets);
 }
 const periodLabel = p => (PERIODS.find(x=>x[0]===p)||[])[1];
+// Entries without a date can't be placed in a period, so they only count under All time. Say so instead of silently leaving them out.
+function undatedNote(){
+  const n=S.txns.filter(t=>!t.date).length;
+  if(!n || S.period==='all') return null;
+  return h('div',{class:'notice'},n+(n===1?' entry has':' entries have')+' no date, so '+(n===1?'it only counts':'they only count')+' under All time. ',
+    h('button',{class:'linkbtn',type:'button',onclick:()=>{S.period='all';setPref('period','all');render();}},'Show all time'));
+}
 function kpi(label, value, sub, tone){ return h('div',{class:'kpi'},h('div',{class:'eyebrow'},label),h('div',{class:'v'+(tone?' '+tone:''),title:value},value),h('div',{class:'s'},sub)); }
 
 function niceStep(max, n){ const raw=max/n, pow=Math.pow(10,Math.floor(Math.log10(raw))); for(const m of [1,2,2.5,5,10]) if(m*pow>=raw) return m*pow; return 10*pow; }
@@ -343,7 +358,7 @@ function drawMoneyChart(box, buckets){
     box.textContent='';
     const W=Math.max(280,box.clientWidth), H=240, m={l:48,r:6,t:10,b:26}, iw=W-m.l-m.r, ih=H-m.t-m.b;
     const max=Math.max(0,...buckets.map(b=>Math.max(b.in,b.out)));
-    if(!max){ box.appendChild(h('div',{class:'empty'},'No money logged in this period.')); return; }
+    if(!max){ box.appendChild(h('div',{class:'empty'}, S.txns.some(t=>!t.date) && !S.txns.some(t=>t.date) ? 'Your entries don’t have dates yet, so they can’t go on the chart. Open an entry in Recent money and add its date.' : 'No money logged in this period.')); return; }
     const step=niceStep(max,4), top=Math.ceil(max/step)*step, y=n=>m.t+ih-(n/top)*ih;
     const n=buckets.length, band=iw/n, bw=Math.max(2,Math.min(22,(band*0.72-2)/2)), gw=bw*2+2;
     const g=svg('svg',{width:W,height:H,viewBox:'0 0 '+W+' '+H,role:'img','aria-hidden':'true'});
@@ -416,7 +431,7 @@ function renderProjects(v){
     list.forEach(p=>grid.appendChild(projectCard(p)));
   };
   const search=h('input',{class:'search',type:'search',placeholder:'Search projects or clients','aria-label':'Search projects',value:S.pQuery,oninput:e=>{S.pQuery=e.target.value;fill();}});
-  v.append(
+  add(v,
     h('div',{class:'page-head'},h('h1',null,'Projects'),canWrite()?h('button',{class:'btn primary',onclick:()=>openProjectSheet()},'+ New project'):null),
     h('div',{class:'filters'},
       h('div',{class:'pills',role:'group','aria-label':'Status'},filters.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.pStatus===k),onclick:()=>{S.pStatus=k;render();}},l+' '+count(k)))),
@@ -428,7 +443,7 @@ function renderProjects(v){
 function renderProject(v,id){
   const p=projOf(id); if(!p){ go({name:'projects'}); return; }
   const s=projStats(p), tx=sortTx(S.txns.filter(t=>t.projectId===id)), c=clientOf(p.clientId);
-  v.append(
+  add(v,
     h('a',{class:'back',href:'#/projects'},'← All projects'),
     h('div',{class:'page-head'},
       h('div',{style:'display:flex;flex-direction:column;gap:6px;min-width:0'},
@@ -475,7 +490,7 @@ function renderClient(v,id){
   const c=clientOf(id); if(!c){ go({name:'clients'}); return; }
   const tx=S.txns.filter(t=>t.clientId===id), s=sumOf(tx), ps=sortProjects(S.projects.filter(p=>p.clientId===id));
   const owed=ps.reduce((a,p)=>a+projStats(p).due,0);
-  v.append(
+  add(v,
     h('a',{class:'back',href:'#/clients'},'← All clients'),
     h('div',{class:'page-head'},
       h('div',{style:'display:flex;flex-direction:column;gap:4px;min-width:0'},h('h1',null,c.name),c.contact?h('div',{class:'muted'},c.contact):null),
@@ -501,7 +516,7 @@ function renderClient(v,id){
 function txRow(t, showClient, showProject){
   const label = t.note || (t.type==='out'?(t.category||'Expense'):'Payment');
   const bits = []; if(showClient) bits.push(clientName(t.clientId)); if(showClient||showProject) bits.push(projName(t.projectId));
-  if(t.type==='out' && t.category && t.note) bits.push(t.category); bits.push(fmtDate(t.date));
+  if(t.type==='out' && t.category && t.note && t.note.toLowerCase()!==t.category.toLowerCase()) bits.push(t.category); bits.push(fmtDate(t.date));
   const kids=[h('span',{class:'dot '+(t.type==='out'?'out':'in'),'aria-hidden':'true'}),
     h('div',{class:'grow'},h('div',{class:'title'},label),h('div',{class:'sub'},bits.join(' · '))),
     h('span',{class:'num '+(t.type==='out'?'out':'in')},(t.type==='out'?'−':'+')+rs(t.amount))];
@@ -519,12 +534,13 @@ function renderMoney(v){
     else list.appendChild(h('div',{class:'list'},tx.map(t=>txRow(t,true))));
   };
   const search=h('input',{class:'search',type:'search',placeholder:'Search notes, clients, projects','aria-label':'Search money',value:S.mQuery,oninput:e=>{S.mQuery=e.target.value;fill();}});
-  v.append(
+  add(v,
     h('div',{class:'page-head'},h('h1',null,'Money'),canWrite()?h('button',{class:'btn primary',onclick:()=>openMoneySheet()},'+ Add money'):null),
     h('div',{class:'filters'},
       h('div',{class:'pills',role:'group','aria-label':'Type'},[['all','All'],['in','Money in'],['out','Money out']].map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.mType===k),onclick:()=>{S.mType=k;render();}},l))),
       h('div',{class:'pills',role:'group','aria-label':'Time period'},PERIODS.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.period===k),onclick:()=>{S.period=k;setPref('period',k);render();}},l))),
       search),
+    undatedNote(),
     list);
   fill();
 }
@@ -710,7 +726,7 @@ const map = {
   clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
   projects: r => ({ id:r.id, clientId:r.client_id, name:r.name, status:r.status||'active', description:r.description||'', quoted:Number(r.quoted)||0,
     previewUrl:cleanUrl(r.preview_url)||'', liveUrl:cleanUrl(r.live_url)||'', githubUrl:cleanUrl(r.github_url)||'', startDate:r.start_date||null, dueDate:r.due_date||null, createdAt:ms(r.created_at) }),
-  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||'', note:r.note||'', date:r.date, createdAt:ms(r.created_at) })
+  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, createdAt:ms(r.created_at) })
 };
 async function load(){
   const res = await Promise.all(TABLES.map(t=>sb.from(t).select('*')));
