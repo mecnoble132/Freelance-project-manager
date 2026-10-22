@@ -12,15 +12,15 @@ const projectRef = { project: str('Project id, title, or "client title" like "Ge
 const projectFieldSchema = {
   status: statusIn,
   quoted: { type: 'number', minimum: 0, description: 'Agreed price in rupees.' },
-  start_date: { ...day('Start date'), type: ['string', 'null'] },
-  due_date: { ...day('Due date'), type: ['string', 'null'] },
+  start_date: str('Start date (YYYY-MM-DD). Empty string clears it.'),
+  due_date: str('Due date (YYYY-MM-DD). Empty string clears it.'),
   preview_url: str('Preview / staging link. Empty string clears it.'),
   live_url: str('Live site link. Empty string clears it.'),
   github_url: str('GitHub repository or project board link. Empty string clears it.'),
   description: str('What the project is: scope, tech stack, notes.')
 };
 const entrySchema = {
-  amount: { type: 'number', exclusiveMinimum: 0, description: 'Amount in rupees.' },
+  amount: { type: 'number', minimum: 0.01, description: 'Amount in rupees.' },
   client: str('Client name or id. Not needed when project is given and unambiguous.'),
   project: str('Project title (or "client title"). Leave out for money not tied to a project.'),
   date: day('Date the money moved. Defaults to today (India time)'),
@@ -117,7 +117,7 @@ const TOOLS = [
   { name: 'update_transaction', title: 'Edit a payment or expense', annotations: EDIT,
     description: 'Changes a money entry by id: amount, date, note, type, category, or which client/project it belongs to. Pass project as an empty string to detach it from its project.',
     inputSchema: obj({ id: str('Entry id, from list_transactions or get_project.'), type: { type: 'string', enum: ['in', 'out'] }, amount: entrySchema.amount,
-      date: { ...day('Date'), type: ['string', 'null'] }, note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project }, ['id']),
+      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project }, ['id']),
     run: W.updateTransaction },
   { name: 'delete_transactions', title: 'Delete payments or expenses', annotations: DELETE,
     description: 'Deletes one or more money entries by id. First call without confirm to see what would be deleted.',

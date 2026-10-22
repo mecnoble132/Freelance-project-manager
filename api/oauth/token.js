@@ -1,5 +1,5 @@
 // Exchanges an authorization code (with its PKCE verifier) or a refresh token for an access token.
-const { sign, verify, clientSecret, safeEqual, pkce, baseUrl, cors, json, body, ACCESS_TTL, REFRESH_TTL, SCOPE } = require('../_lib/oauth');
+const { sign, verify, clientSecret, safeEqual, pkce, baseUrl, cors, json, body, ACCESS_TTL, REFRESH_TTL, SCOPE, logRequest } = require('../_lib/oauth');
 const { userStillActive } = require('../_lib/supabase');
 
 const oops = (res, error, description, status = 400) => { console.warn('[oauth/token]', status, error, '-', description); json(res, status, { error, error_description: description }); };
@@ -22,6 +22,7 @@ function issue(res, base, user, clientId) {
 }
 
 module.exports = async (req, res) => {
+  logRequest(req, res, () => 'grant=' + ((req.body && req.body.grant_type) || '?'));
   cors(res);
   if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
   if (req.method !== 'POST') return oops(res, 'invalid_request', 'Use POST.', 405);

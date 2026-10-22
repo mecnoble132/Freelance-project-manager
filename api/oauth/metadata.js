@@ -1,8 +1,9 @@
 // OAuth discovery documents: protected resource metadata (RFC 9728) and authorization server metadata (RFC 8414).
 // vercel.json routes the /.well-known/ addresses here.
-const { baseUrl, cors, json, SCOPE } = require('../_lib/oauth');
+const { baseUrl, cors, json, SCOPE, logRequest } = require('../_lib/oauth');
 
 module.exports = (req, res) => {
+  logRequest(req, res, () => 'type=' + req.query.type);
   cors(res);
   if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
   const base = baseUrl(req);

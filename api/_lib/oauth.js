@@ -38,6 +38,12 @@ const safeEqual = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(
 const pkce = verifier => crypto.createHash('sha256').update(verifier).digest('base64url');
 
 // ---------- http helpers ----------
+// One line per request (never tokens, codes or passwords), so a failed connection shows where it stopped.
+function logRequest(req, res, detail) {
+  const started = Date.now();
+  res.on('finish', () => console.log('[req]', req.method, (req.url || '').split('?')[0], '->', res.statusCode, Date.now() - started + 'ms',
+    (typeof detail === 'function' ? detail() : detail) || '', '| ua:', String(req.headers['user-agent'] || '').slice(0, 60)));
+}
 function baseUrl(req) {
   const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
   const host = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim();
@@ -77,4 +83,4 @@ function validRedirect(u) {
   } catch (e) { return false; }
 }
 
-module.exports = { sign, verify, clientSecret, safeEqual, pkce, baseUrl, cors, json, body, esc, validRedirect, ACCESS_TTL, REFRESH_TTL, CODE_TTL, SCOPE };
+module.exports = { logRequest, sign, verify, clientSecret, safeEqual, pkce, baseUrl, cors, json, body, esc, validRedirect, ACCESS_TTL, REFRESH_TTL, CODE_TTL, SCOPE };

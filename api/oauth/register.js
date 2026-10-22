@@ -1,8 +1,9 @@
 // Dynamic client registration (RFC 7591). Nothing is stored: the client id is a signed copy of the registration,
 // so the redirect addresses can't be changed later.
-const { sign, clientSecret, cors, json, body, validRedirect } = require('../_lib/oauth');
+const { sign, clientSecret, cors, json, body, validRedirect, logRequest } = require('../_lib/oauth');
 
 module.exports = (req, res) => {
+  logRequest(req, res, () => 'auth_method=' + ((req.body && req.body.token_endpoint_auth_method) || 'none') + ' redirects=' + JSON.stringify((req.body && req.body.redirect_uris) || []));
   cors(res);
   if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
   if (req.method !== 'POST') return json(res, 405, { error: 'invalid_request', error_description: 'Use POST.' }, { Allow: 'POST' });
