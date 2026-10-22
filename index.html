@@ -1,0 +1,327 @@
+<title>Client Ledger</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* Layout: one phone-width column — profit summary, clients, recent money; a client opens its own page; a bottom sheet adds things. */
+:root{
+  --bg:#f3f5f8; --panel:#ffffff; --fg:#141821; --muted:#5d6577; --line:#e1e5ec;
+  --accent:#2b4fd8; --accent-ink:#ffffff; --in:#17855a; --out:#c23d2a; --in-soft:#e3f4ec; --out-soft:#fbe9e6;
+  --shadow:0 1px 2px rgba(20,24,33,.06),0 8px 24px rgba(20,24,33,.06);
+  --display:"Bricolage Grotesque",ui-sans-serif,system-ui,sans-serif;
+  --body:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f1218; --panel:#181c25; --fg:#eef0f5; --muted:#9aa2b4; --line:#2a303d;
+  --accent:#7d95ff; --accent-ink:#0f1218; --in:#4fd197; --out:#ff8a76; --in-soft:#173329; --out-soft:#3a1f1b;
+  --shadow:0 1px 2px rgba(0,0,0,.3); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f1218; --panel:#181c25; --fg:#eef0f5; --muted:#9aa2b4; --line:#2a303d;
+  --accent:#7d95ff; --accent-ink:#0f1218; --in:#4fd197; --out:#ff8a76; --in-soft:#173329; --out-soft:#3a1f1b;
+  --shadow:0 1px 2px rgba(0,0,0,.3); color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.45}
+.app{max-width:640px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 120px;display:flex;flex-direction:column;gap:24px}
+h1,h2,h3{font-family:var(--display);margin:0;text-wrap:balance}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.brand{font-size:22px;font-weight:800;letter-spacing:-.01em}
+.muted{color:var(--muted)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.in{color:var(--in)} .out{color:var(--out)}
+.hero{background:var(--panel);border-radius:18px;padding:20px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px}
+.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.big{font-family:var(--display);font-weight:800;font-size:clamp(40px,11vw,56px);line-height:1;letter-spacing:-.02em}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.chip{border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:2px}
+.chip.in{background:var(--in-soft)} .chip.out{background:var(--out-soft)}
+.chip .lbl{font-size:12px;color:var(--muted)}
+.chip .v{font-family:var(--mono);font-size:17px}
+.month{font-size:13px;color:var(--muted)}
+.sec{display:flex;flex-direction:column;gap:10px}
+.sec-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.sec-head h2{font-size:18px;font-weight:600}
+.list{background:var(--panel);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line);min-width:0}
+.row:last-child{border-bottom:none}
+button.row{width:100%;background:none;border:none;border-bottom:1px solid var(--line);color:inherit;font:inherit;text-align:left;cursor:pointer}
+button.row:last-child{border-bottom:none}
+button.row:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.avatar{width:38px;height:38px;border-radius:11px;flex:none;display:grid;place-items:center;font-family:var(--display);font-weight:800;font-size:16px;background:color-mix(in srgb,var(--accent) 14%,var(--panel));color:var(--accent)}
+.grow{flex:1;min-width:0}
+.title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.right{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:1px}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.dot.in{background:var(--in)} .dot.out{background:var(--out)}
+.btn{font:inherit;font-weight:600;border-radius:10px;padding:9px 14px;border:1px solid var(--line);background:var(--panel);color:var(--fg);cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.danger{background:var(--out);border-color:var(--out);color:#fff}
+.btn.small{padding:6px 10px;font-size:13px}
+.btn:focus-visible,button.row:focus-visible,.x:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.fab{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom,0px));z-index:5;box-shadow:0 8px 24px rgba(20,40,120,.28);padding:14px 22px;border-radius:999px;font-size:16px}
+.empty{background:var(--panel);border:1px dashed var(--line);border-radius:14px;padding:22px;text-align:center;color:var(--muted)}
+.back{background:none;border:none;color:var(--accent);font:inherit;font-weight:600;cursor:pointer;padding:4px 0}
+.proj{background:var(--panel);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.proj-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.proj-head h3{font-size:16px;font-family:var(--body);font-weight:600}
+.x{background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;padding:4px 6px;border-radius:6px}
+.x:hover{color:var(--out)}
+.confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:var(--out-soft);font-size:14px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.status{font-size:13px;color:var(--muted);text-align:center}
+.err{color:var(--out);font-size:14px}
+/* sheet */
+.scrim{position:fixed;inset:0;background:rgba(10,12,18,.45);z-index:20;display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--panel);width:100%;max-width:560px;border-radius:20px 20px 0 0;padding:20px max(18px,env(safe-area-inset-right,0px)) calc(20px + env(safe-area-inset-bottom,0px)) max(18px,env(safe-area-inset-left,0px));display:flex;flex-direction:column;gap:14px;max-height:92vh;overflow:auto}
+.sheet h2{font-size:20px}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:13px;font-weight:600;color:var(--muted)}
+input,select,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%;box-sizing:border-box}
+.amount{font-family:var(--mono);font-size:22px}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--bg);padding:4px;border-radius:12px}
+.seg button{font:inherit;font-weight:600;border:none;border-radius:9px;padding:10px;background:none;color:var(--muted);cursor:pointer}
+.seg button[aria-pressed="true"].in{background:var(--in);color:#fff}
+.seg button[aria-pressed="true"].out{background:var(--out);color:#fff}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:420px){.two{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:no-preference){.sheet{animation:up .22s ease-out}@keyframes up{from{transform:translateY(24px);opacity:.6}}}
+</style>
+
+<div class="app" id="app">
+  <div class="top"><div class="brand">Client Ledger</div><span class="muted" id="who"></span></div>
+  <div id="view"><div class="empty">Loading your clients and money…</div></div>
+</div>
+<button class="btn primary fab" id="fab" hidden>+ Add money</button>
+<div id="sheet-root"></div>
+
+<script>
+(function(){
+const S = { clients:[], projects:[], txns:[], view:{name:'home'}, ready:{c:false,p:false,t:false}, canWrite:true, confirmDel:null, error:'' };
+let db = null;
+const $ = (s,el=document)=>el.querySelector(s);
+const rs = n => '₹' + Math.round(Number(n)||0).toLocaleString('en-IN');
+const signed = n => (n<0?'−':'') + rs(Math.abs(n));
+const today = () => { const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+const fmtDate = d => { if(!d) return 'Earlier'; const [y,m,dd]=d.split('-').map(Number); return new Date(y,m-1,dd).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}); };
+function h(tag, attrs, ...kids){ const el=document.createElement(tag); if(attrs) for(const k in attrs){ const v=attrs[k]; if(v==null||v===false) continue; if(k==='class') el.className=v; else if(k.startsWith('on')) el.addEventListener(k.slice(2),v); else el.setAttribute(k,v===true?'':v);} kids.flat().forEach(c=>{ if(c==null||c===false) return; el.appendChild(typeof c==='string'||typeof c==='number'?document.createTextNode(String(c)):c); }); return el; }
+
+function sumOf(txns){ let i=0,o=0; txns.forEach(t=>{ if(t.type==='out') o+=Number(t.amount)||0; else i+=Number(t.amount)||0; }); return {earned:i, spent:o, profit:i-o}; }
+const clientName = id => (S.clients.find(c=>c.id===id)||{}).name || 'Unknown client';
+const projName = id => (S.projects.find(p=>p.id===id)||{}).name || 'General';
+const sortTx = arr => arr.slice().sort((a,b)=> (b.date||'').localeCompare(a.date||'') || (b.createdAt||0)-(a.createdAt||0));
+const sortClients = arr => arr.slice().sort((a,b)=>(a.order??1e9)-(b.order??1e9) || (a.createdAt||0)-(b.createdAt||0));
+
+function render(){
+  const v = $('#view'); v.textContent='';
+  const ready = S.ready.c && S.ready.p && S.ready.t;
+  $('#fab').hidden = !ready || !S.canWrite || !db;
+  if(S.error){ v.appendChild(h('div',{class:'empty'},S.error)); return; }
+  if(!ready){ v.appendChild(h('div',{class:'empty'},'Loading your clients and money…')); return; }
+  if(S.view.name==='client') return renderClient(v, S.view.id);
+  renderHome(v);
+}
+
+function renderHome(v){
+  const all = sumOf(S.txns);
+  const ym = today().slice(0,7);
+  const month = sumOf(S.txns.filter(t=>(t.date||'').startsWith(ym)));
+  v.append(
+    h('div',{class:'hero'},
+      h('div',{class:'eyebrow'},'Total profit'),
+      h('div',{class:'big num'+(all.profit<0?' out':'')}, signed(all.profit)),
+      h('div',{class:'split'},
+        h('div',{class:'chip in'},h('span',{class:'lbl'},'Money in'),h('span',{class:'v in'},rs(all.earned))),
+        h('div',{class:'chip out'},h('span',{class:'lbl'},'Money out'),h('span',{class:'v out'},rs(all.spent)))),
+      h('div',{class:'month'}, 'This month: ', h('span',{class:'num'},signed(month.profit)), ' profit from ', h('span',{class:'num'},rs(month.earned)), ' in')
+    )
+  );
+  // clients
+  const sec = h('div',{class:'sec'},
+    h('div',{class:'sec-head'},h('h2',null,'Clients'), S.canWrite && db ? h('button',{class:'btn small',onclick:()=>openClientSheet()},'+ New client') : null));
+  const clients = sortClients(S.clients);
+  if(!clients.length){ sec.appendChild(h('div',{class:'empty'},'No clients yet. Add your first client, then log what they paid you.')); }
+  else {
+    const list = h('div',{class:'list'});
+    clients.forEach(c=>{
+      const tx = S.txns.filter(t=>t.clientId===c.id);
+      const s = sumOf(tx);
+      const nP = S.projects.filter(p=>p.clientId===c.id).length;
+      list.appendChild(h('button',{class:'row',onclick:()=>go({name:'client',id:c.id})},
+        h('div',{class:'avatar','aria-hidden':'true'},(c.name||'?').trim().charAt(0).toUpperCase()),
+        h('div',{class:'grow'},h('div',{class:'title'},c.name),h('div',{class:'sub'}, nP+(nP===1?' project':' projects')+' · '+rs(s.earned)+' in')),
+        h('div',{class:'right'},h('span',{class:'num'+(s.profit<0?' out':'')},signed(s.profit)),h('span',{class:'sub'},'profit'))));
+    });
+    sec.appendChild(list);
+  }
+  v.appendChild(sec);
+  // recent
+  const rec = h('div',{class:'sec'},h('div',{class:'sec-head'},h('h2',null,'Recent money')));
+  const tx = sortTx(S.txns).slice(0,8);
+  if(!tx.length) rec.appendChild(h('div',{class:'empty'},'Every payment and expense you log shows up here.'));
+  else { const list=h('div',{class:'list'}); tx.forEach(t=>list.appendChild(txRow(t,true))); rec.appendChild(list); }
+  v.appendChild(rec);
+}
+
+function txRow(t, showClient){
+  const label = t.note || (t.type==='out'?'Expense':'Payment');
+  const sub = (showClient ? clientName(t.clientId)+' · '+projName(t.projectId)+' · ' : '') + fmtDate(t.date);
+  const row = h('div',{class:'row'},
+    h('span',{class:'dot '+(t.type==='out'?'out':'in'),'aria-hidden':'true'}),
+    h('div',{class:'grow'},h('div',{class:'title'},label),h('div',{class:'sub'},sub)),
+    h('span',{class:'num '+(t.type==='out'?'out':'in')},(t.type==='out'?'−':'+')+rs(t.amount)),
+    (!showClient && S.canWrite && db) ? h('button',{class:'x','aria-label':'Delete '+label,title:'Delete',onclick:()=>{S.confirmDel=t.id;render();}},'×') : null);
+  if(S.confirmDel===t.id){
+    return h('div',null,row,h('div',{class:'confirm'},
+      h('span',{class:'grow'},'Delete this entry?'),
+      h('button',{class:'btn small',onclick:()=>{S.confirmDel=null;render();}},'Keep'),
+      h('button',{class:'btn small danger',onclick:async()=>{S.confirmDel=null; try{await db.doc('txns/'+t.id).delete();}catch(e){toastErr(e);} }},'Delete')));
+  }
+  return row;
+}
+
+function renderClient(v, id){
+  const c = S.clients.find(x=>x.id===id);
+  if(!c){ go({name:'home'}); return; }
+  const tx = S.txns.filter(t=>t.clientId===id);
+  const s = sumOf(tx);
+  v.append(
+    h('button',{class:'back',onclick:()=>go({name:'home'})},'← All clients'),
+    h('div',{class:'hero'},
+      h('h1',{style:'font-size:28px'},c.name),
+      c.contact ? h('div',{class:'muted'},c.contact) : null,
+      h('div',{class:'split'},
+        h('div',{class:'chip in'},h('span',{class:'lbl'},'Money in'),h('span',{class:'v in'},rs(s.earned))),
+        h('div',{class:'chip out'},h('span',{class:'lbl'},'Money out'),h('span',{class:'v out'},rs(s.spent)))),
+      h('div',{class:'month'},'Profit from this client: ',h('span',{class:'num'+(s.profit<0?' out':' in')},signed(s.profit))),
+      (S.canWrite&&db) ? h('div',{class:'actions'},
+        h('button',{class:'btn primary small',onclick:()=>openMoneySheet({clientId:id})},'+ Add money'),
+        h('button',{class:'btn small',onclick:()=>openProjectSheet(id)},'+ New project')) : null
+    ));
+  const projects = S.projects.filter(p=>p.clientId===id).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+  const sec = h('div',{class:'sec'},h('div',{class:'sec-head'},h('h2',null,'Projects')));
+  if(!projects.length) sec.appendChild(h('div',{class:'empty'},'No projects for '+c.name+' yet. Add one, like "Website" or "Maintenance".'));
+  projects.forEach(p=>{
+    const ptx = sortTx(tx.filter(t=>t.projectId===p.id));
+    const ps = sumOf(ptx);
+    const box = h('div',{class:'proj'},
+      h('div',{class:'proj-head'},h('h3',null,p.name),h('span',{class:'num'+(ps.profit<0?' out':' in')},signed(ps.profit))));
+    if(!ptx.length) box.appendChild(h('div',{class:'row sub'},'No money logged yet.'));
+    ptx.forEach(t=>box.appendChild(txRow(t,false)));
+    if(S.canWrite&&db) box.appendChild(h('div',{class:'row'},h('button',{class:'btn small',onclick:()=>openMoneySheet({clientId:id,projectId:p.id})},'+ Add to '+p.name)));
+    sec.appendChild(box);
+  });
+  const loose = sortTx(tx.filter(t=>!projects.some(p=>p.id===t.projectId)));
+  if(loose.length){ const box=h('div',{class:'proj'},h('div',{class:'proj-head'},h('h3',null,'Other'))); loose.forEach(t=>box.appendChild(txRow(t,false))); sec.appendChild(box); }
+  v.appendChild(sec);
+}
+
+function go(view){ S.view=view; S.confirmDel=null; render(); window.scrollTo(0,0); }
+function toastErr(e){ const m = e && e.code==='quota_exceeded' ? 'Storage is full. Delete some old entries and try again.' : 'Couldn’t save that. Check your connection and try again.'; const r=$('#sheet-err'); if(r) r.textContent=m; else { S.error=''; console.warn(e); } }
+
+// ---------- sheets ----------
+function closeSheet(){ $('#sheet-root').textContent=''; }
+function sheet(titleText, body, onSubmit, submitLabel){
+  const err = h('div',{class:'err',id:'sheet-err',role:'alert'});
+  const save = h('button',{class:'btn primary',type:'submit'},submitLabel);
+  const form = h('form',{class:'sheet',role:'dialog','aria-label':titleText},
+    h('h2',null,titleText), body, err,
+    h('div',{class:'actions',style:'justify-content:flex-end'},h('button',{class:'btn',type:'button',onclick:closeSheet},'Cancel'),save));
+  form.addEventListener('submit',async e=>{ e.preventDefault(); err.textContent=''; save.disabled=true; try{ const ok = await onSubmit(); if(ok!==false) closeSheet(); }catch(x){ toastErr(x); } finally{ save.disabled=false; } });
+  const scrim = h('div',{class:'scrim',onclick:e=>{ if(e.target===scrim) closeSheet(); }},form);
+  const root=$('#sheet-root'); root.textContent=''; root.appendChild(scrim);
+  const first = form.querySelector('input,select'); if(first) first.focus();
+}
+const NEW='__new__';
+function openMoneySheet(pre={}){
+  let type='in';
+  const segIn = h('button',{type:'button',class:'in','aria-pressed':'true'},'Money in');
+  const segOut = h('button',{type:'button',class:'out','aria-pressed':'false'},'Money out');
+  const setType=t=>{ type=t; segIn.setAttribute('aria-pressed',t==='in'); segOut.setAttribute('aria-pressed',t==='out'); note.placeholder = t==='in' ? 'e.g. Website payment, advance' : 'e.g. Domain, hosting, template'; };
+  segIn.onclick=()=>setType('in'); segOut.onclick=()=>setType('out');
+  const amount = h('input',{id:'m-amount',class:'amount',type:'number',inputmode:'decimal',min:'1',step:'any',required:true,placeholder:'0'});
+  const cSel = h('select',{id:'m-client'});
+  sortClients(S.clients).forEach(c=>cSel.appendChild(h('option',{value:c.id},c.name)));
+  cSel.appendChild(h('option',{value:NEW},'+ New client…'));
+  const cNew = h('input',{id:'m-client-new',placeholder:'Client name',hidden:true});
+  const pSel = h('select',{id:'m-project'});
+  const pNew = h('input',{id:'m-project-new',placeholder:'Project name, e.g. Website',hidden:true});
+  const note = h('input',{id:'m-note',placeholder:'e.g. Website payment, advance'});
+  const date = h('input',{id:'m-date',type:'date',value:today()});
+  function fillProjects(){
+    pSel.textContent='';
+    const cid=cSel.value;
+    const ps = cid===NEW?[]:S.projects.filter(p=>p.clientId===cid).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+    ps.forEach(p=>pSel.appendChild(h('option',{value:p.id},p.name)));
+    pSel.appendChild(h('option',{value:NEW},'+ New project…'));
+    if(pre.projectId && ps.some(p=>p.id===pre.projectId)) pSel.value=pre.projectId;
+    pNew.hidden = pSel.value!==NEW; if(!pNew.hidden && !pNew.value) pNew.value = ps.length?'':'Website';
+  }
+  cSel.onchange=()=>{ cNew.hidden = cSel.value!==NEW; fillProjects(); };
+  pSel.onchange=()=>{ pNew.hidden = pSel.value!==NEW; };
+  if(pre.clientId) cSel.value=pre.clientId; else if(!S.clients.length) cSel.value=NEW;
+  cNew.hidden = cSel.value!==NEW; fillProjects();
+  sheet('Add money', [
+    h('div',{class:'seg',role:'group','aria-label':'Type'},segIn,segOut),
+    h('div',{class:'field'},h('label',{for:'m-amount'},'Amount (₹)'),amount),
+    h('div',{class:'two'},
+      h('div',{class:'field'},h('label',{for:'m-client'},'Client'),cSel,cNew),
+      h('div',{class:'field'},h('label',{for:'m-project'},'Project'),pSel,pNew)),
+    h('div',{class:'two'},
+      h('div',{class:'field'},h('label',{for:'m-note'},'What for'),note),
+      h('div',{class:'field'},h('label',{for:'m-date'},'Date'),date))
+  ], async ()=>{
+    const amt = Number(amount.value);
+    if(!(amt>0)){ $('#sheet-err').textContent='Enter an amount above ₹0.'; return false; }
+    let clientId = cSel.value;
+    if(clientId===NEW){
+      const name = cNew.value.trim(); if(!name){ $('#sheet-err').textContent='Type the new client’s name.'; return false; }
+      const ref = db.collection('clients').doc(); await ref.set({name, contact:'', createdAt:Date.now(), order:S.clients.length}); clientId=ref.id;
+    }
+    let projectId = pSel.value;
+    if(projectId===NEW){
+      const name = pNew.value.trim(); if(!name){ $('#sheet-err').textContent='Type a project name, like Website.'; return false; }
+      const ref = db.collection('projects').doc(); await ref.set({clientId, name, createdAt:Date.now()}); projectId=ref.id;
+    }
+    await db.collection('txns').doc().set({clientId, projectId, type, amount:amt, note:note.value.trim(), date:date.value||null, createdAt:Date.now()});
+  }, 'Save');
+}
+function openClientSheet(){
+  const name=h('input',{id:'c-name',required:true,placeholder:'e.g. GeekBoz'});
+  const contact=h('input',{id:'c-contact',placeholder:'Phone or email (optional)'});
+  const proj=h('input',{id:'c-proj',value:'Website',placeholder:'First project'});
+  sheet('New client',[
+    h('div',{class:'field'},h('label',{for:'c-name'},'Client name'),name),
+    h('div',{class:'field'},h('label',{for:'c-contact'},'Contact'),contact),
+    h('div',{class:'field'},h('label',{for:'c-proj'},'First project'),proj)
+  ], async ()=>{
+    const n=name.value.trim(); if(!n){ $('#sheet-err').textContent='Give the client a name.'; return false; }
+    const ref=db.collection('clients').doc(); await ref.set({name:n, contact:contact.value.trim(), createdAt:Date.now(), order:S.clients.length});
+    if(proj.value.trim()) await db.collection('projects').doc().set({clientId:ref.id, name:proj.value.trim(), createdAt:Date.now()});
+    go({name:'client',id:ref.id});
+  }, 'Add client');
+}
+function openProjectSheet(clientId){
+  const name=h('input',{id:'p-name',required:true,placeholder:'e.g. Maintenance, New feature'});
+  sheet('New project for '+clientName(clientId),[h('div',{class:'field'},h('label',{for:'p-name'},'Project name'),name)], async ()=>{
+    const n=name.value.trim(); if(!n){ $('#sheet-err').textContent='Give the project a name.'; return false; }
+    await db.collection('projects').doc().set({clientId, name:n, createdAt:Date.now()});
+  }, 'Add project');
+}
+$('#fab').addEventListener('click',()=>openMoneySheet(S.view.name==='client'?{clientId:S.view.id}:{}));
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheet(); });
+
+// ---------- data ----------
+render();
+(async ()=>{
+  const [d, user] = window.claude ? await Promise.all([window.claude.use('db'), window.claude.use('user')]) : [null,null];
+  db = d;
+  if(!db){ S.error='Sign in to claude.ai to see your ledger.'; render(); return; }
+  if(user){ try{ const ok = await user.canEdit(); if(ok===false) S.canWrite=false; }catch(_){} }
+  const sub = (col,key)=> db.collection(col).onSnapshot(snap=>{
+    S[col] = snap.docs.map(x=>Object.assign({id:x.id}, x.data()));
+    S.ready[key]=true; render();
+  }, e=>{ S.error = e.code==='revoked' ? 'This ledger isn’t available right now.' : 'Couldn’t load your ledger. Reload the page to try again.'; render(); });
+  sub('clients','c'); sub('projects','p'); sub('txns','t');
+})();
+})();
+</script>
