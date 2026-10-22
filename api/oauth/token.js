@@ -1,8 +1,8 @@
 // Exchanges an authorization code (with its PKCE verifier) or a refresh token for an access token.
 const { sign, verify, clientSecret, safeEqual, pkce, baseUrl, cors, json, body, ACCESS_TTL, REFRESH_TTL, SCOPE } = require('../_lib/oauth');
-const { getUser } = require('../_lib/supabase');
+const { userStillActive } = require('../_lib/supabase');
 
-const oops = (res, error, description, status = 400) => json(res, status, { error, error_description: description });
+const oops = (res, error, description, status = 400) => { console.warn('[oauth/token]', status, error, '-', description); json(res, status, { error, error_description: description }); };
 
 // Public clients send only client_id; confidential ones also prove they hold the secret issued at registration.
 function authClient(req, b) {
@@ -34,16 +34,14 @@ module.exports = async (req, res) => {
     if (!code || code.cid !== c.id) return oops(res, 'invalid_grant', 'The code is invalid or has expired.');
     if (b.redirect_uri && b.redirect_uri !== code.ru) return oops(res, 'invalid_grant', 'redirect_uri doesn’t match.');
     if (!b.code_verifier || !safeEqual(pkce(String(b.code_verifier)), code.cc)) return oops(res, 'invalid_grant', 'PKCE verification failed.');
-    const user = await getUser(code.uid);
-    if (!user) return oops(res, 'invalid_grant', 'That account no longer exists.');
-    return issue(res, base, user, c.id);
+    // The code was minted moments ago, right after the password was checked, so it already names the user.
+    return issue(res, base, { id: code.uid, email: code.em }, c.id);
   }
   if (b.grant_type === 'refresh_token') {
     const r = verify('refresh', b.refresh_token);
     if (!r || r.cid !== c.id) return oops(res, 'invalid_grant', 'The refresh token is invalid or has expired.');
-    const user = await getUser(r.sub);
-    if (!user) return oops(res, 'invalid_grant', 'That account no longer exists.');
-    return issue(res, base, user, c.id);
+    if (!(await userStillActive(r.sub))) return oops(res, 'invalid_grant', 'That account no longer exists.');
+    return issue(res, base, { id: r.sub, email: r.em }, c.id);
   }
   oops(res, 'unsupported_grant_type', 'Use authorization_code or refresh_token.');
 };

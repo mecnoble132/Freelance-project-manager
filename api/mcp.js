@@ -46,6 +46,7 @@ module.exports = async (req, res) => {
   const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
   const token = m && verify('access', m[1]);
   if (!token || token.aud !== base + '/api/mcp') {
+    if (m) console.warn('[mcp] 401:', token ? 'token is for ' + token.aud + ', not ' + base + '/api/mcp' : 'token invalid or expired');
     return json(res, 401, err(null, -32001, 'Sign in required'), {
       'WWW-Authenticate': 'Bearer resource_metadata="' + base + '/.well-known/oauth-protected-resource/api/mcp"' + (m ? ', error="invalid_token"' : '')
     });
