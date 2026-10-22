@@ -1,6 +1,6 @@
 # Client Ledger
 
-My personal web app for running my website development service: every client, every project, and every rupee in or out.
+My personal web app for running my website development service: every client, every project, and every rupee in or out. Only I can sign in.
 
 ## What it does
 
@@ -8,19 +8,25 @@ My personal web app for running my website development service: every client, ev
 - Lists clients with their projects and profit per client
 - Logs payments (money in) and expenses like domains (money out), each tied to a client and project
 - Lets me add clients and projects, and delete entries
+- Email and password sign-in, with password reset
 
 ## How it works
 
-`index.html` is a single self-contained page: HTML, CSS and plain JavaScript, no build step.
+A static site with no build step: `index.html` (HTML, CSS and plain JavaScript), `config.js`, and [Supabase](https://supabase.com) for sign-in and data.
 
-It runs as a Claude artifact on claude.ai and stores its data with the artifact's built-in database (`window.claude.use("db")`), in three collections:
-
-| Collection | Fields |
+| Table | Columns |
 |---|---|
-| `clients` | `name`, `contact`, `createdAt`, `order` |
-| `projects` | `clientId`, `name`, `createdAt` |
-| `txns` | `clientId`, `projectId`, `type` (`in` / `out`), `amount` (₹), `note`, `date` (YYYY-MM-DD), `createdAt` |
+| `clients` | `name`, `contact`, `sort_order` |
+| `projects` | `client_id`, `name` |
+| `txns` | `client_id`, `project_id`, `type` (`in` / `out`), `amount` (₹), `note`, `date` |
 
-Access rules make the data readable and writable only by the owner.
+Every table also has `id`, `user_id` and `created_at`. Row-level security lets each signed-in user see and change only their own rows, and sign-ups are turned off, so my account is the only one.
 
-The data itself is not stored in this repo. Opened outside claude.ai, the page loads but can't reach the database. Running it on my own domain means swapping the `db` calls for a backend such as Firebase or Supabase.
+## Setup
+
+1. In Supabase, run `supabase/schema.sql` in the SQL editor.
+2. Authentication → Sign In / Providers: turn **off** "Allow new users to sign up".
+3. Authentication → Users → Add user: create my account with email and password.
+4. Authentication → URL Configuration: set the Site URL to where the app is hosted.
+5. Put the project URL and anon key in `config.js` (never the service_role key).
+6. Host the folder anywhere static, such as Vercel.

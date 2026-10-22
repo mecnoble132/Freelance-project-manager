@@ -1,5 +1,9 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
 <title>Client Ledger</title>
-<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
 <style>
@@ -20,7 +24,10 @@
   --bg:#0f1218; --panel:#181c25; --fg:#eef0f5; --muted:#9aa2b4; --line:#2a303d;
   --accent:#7d95ff; --accent-ink:#0f1218; --in:#4fd197; --out:#ff8a76; --in-soft:#173329; --out-soft:#3a1f1b;
   --shadow:0 1px 2px rgba(0,0,0,.3); color-scheme:dark}
-body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.45}
+*,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none!important}
+html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.45}
 .app{max-width:640px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 120px;display:flex;flex-direction:column;gap:24px}
 h1,h2,h3{font-family:var(--display);margin:0;text-wrap:balance}
 .top{display:flex;justify-content:space-between;align-items:center;gap:12px}
@@ -70,6 +77,9 @@ button.row:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
 .actions{display:flex;gap:8px;flex-wrap:wrap}
 .status{font-size:13px;color:var(--muted);text-align:center}
 .err{color:var(--out);font-size:14px}
+.login{width:100%;max-width:380px;margin:10vh auto 0;box-sizing:border-box;background:var(--panel);border-radius:18px;box-shadow:var(--shadow);padding:24px;display:flex;flex-direction:column;gap:14px}
+.login h1{font-size:26px}
+.linkbtn{background:none;border:none;color:var(--accent);font:inherit;font-size:13px;cursor:pointer;padding:0;align-self:flex-start}
 /* sheet */
 .scrim{position:fixed;inset:0;background:rgba(10,12,18,.45);z-index:20;display:flex;align-items:flex-end;justify-content:center}
 .sheet{background:var(--panel);width:100%;max-width:560px;border-radius:20px 20px 0 0;padding:20px max(18px,env(safe-area-inset-right,0px)) calc(20px + env(safe-area-inset-bottom,0px)) max(18px,env(safe-area-inset-left,0px));display:flex;flex-direction:column;gap:14px;max-height:92vh;overflow:auto}
@@ -88,15 +98,17 @@ input,select,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1
 </style>
 
 <div class="app" id="app">
-  <div class="top"><div class="brand">Client Ledger</div><span class="muted" id="who"></span></div>
+  <div class="top"><div class="brand">Client Ledger</div><button class="btn small" id="signout" type="button" hidden>Sign out</button></div>
   <div id="view"><div class="empty">Loading your clients and money…</div></div>
 </div>
 <button class="btn primary fab" id="fab" hidden>+ Add money</button>
 <div id="sheet-root"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
 <script>
 (function(){
-const S = { clients:[], projects:[], txns:[], view:{name:'home'}, ready:{c:false,p:false,t:false}, canWrite:true, confirmDel:null, error:'' };
+const S = { clients:[], projects:[], txns:[], view:{name:'home'}, ready:{c:false,p:false,t:false}, canWrite:true, confirmDel:null, error:'', session:null, authReady:false };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
 const rs = n => '₹' + Math.round(Number(n)||0).toLocaleString('en-IN');
@@ -113,6 +125,9 @@ const sortClients = arr => arr.slice().sort((a,b)=>(a.order??1e9)-(b.order??1e9)
 
 function render(){
   const v = $('#view'); v.textContent='';
+  $('#signout').hidden = !(S.session && S.session.user);
+  if(!S.authReady){ $('#fab').hidden=true; v.appendChild(h('div',{class:'empty'},'Loading…')); return; }
+  if(!S.session){ $('#fab').hidden=true; return renderLogin(v); }
   const ready = S.ready.c && S.ready.p && S.ready.t;
   $('#fab').hidden = !ready || !S.canWrite || !db;
   if(S.error){ v.appendChild(h('div',{class:'empty'},S.error)); return; }
@@ -174,7 +189,7 @@ function txRow(t, showClient){
     return h('div',null,row,h('div',{class:'confirm'},
       h('span',{class:'grow'},'Delete this entry?'),
       h('button',{class:'btn small',onclick:()=>{S.confirmDel=null;render();}},'Keep'),
-      h('button',{class:'btn small danger',onclick:async()=>{S.confirmDel=null; try{await db.doc('txns/'+t.id).delete();}catch(e){toastErr(e);} }},'Delete')));
+      h('button',{class:'btn small danger',onclick:async()=>{S.confirmDel=null; try{await api.del('txns',t.id);}catch(e){toastErr(e);} }},'Delete')));
   }
   return row;
 }
@@ -275,14 +290,14 @@ function openMoneySheet(pre={}){
     let clientId = cSel.value;
     if(clientId===NEW){
       const name = cNew.value.trim(); if(!name){ $('#sheet-err').textContent='Type the new client’s name.'; return false; }
-      const ref = db.collection('clients').doc(); await ref.set({name, contact:'', createdAt:Date.now(), order:S.clients.length}); clientId=ref.id;
+      clientId = await api.insert('clients',{name, contact:'', sort_order:S.clients.length});
     }
     let projectId = pSel.value;
     if(projectId===NEW){
       const name = pNew.value.trim(); if(!name){ $('#sheet-err').textContent='Type a project name, like Website.'; return false; }
-      const ref = db.collection('projects').doc(); await ref.set({clientId, name, createdAt:Date.now()}); projectId=ref.id;
+      projectId = await api.insert('projects',{client_id:clientId, name});
     }
-    await db.collection('txns').doc().set({clientId, projectId, type, amount:amt, note:note.value.trim(), date:date.value||null, createdAt:Date.now()});
+    await api.insert('txns',{client_id:clientId, project_id:projectId, type, amount:amt, note:note.value.trim(), date:date.value||null});
   }, 'Save');
 }
 function openClientSheet(){
@@ -295,33 +310,90 @@ function openClientSheet(){
     h('div',{class:'field'},h('label',{for:'c-proj'},'First project'),proj)
   ], async ()=>{
     const n=name.value.trim(); if(!n){ $('#sheet-err').textContent='Give the client a name.'; return false; }
-    const ref=db.collection('clients').doc(); await ref.set({name:n, contact:contact.value.trim(), createdAt:Date.now(), order:S.clients.length});
-    if(proj.value.trim()) await db.collection('projects').doc().set({clientId:ref.id, name:proj.value.trim(), createdAt:Date.now()});
-    go({name:'client',id:ref.id});
+    const cid = await api.insert('clients',{name:n, contact:contact.value.trim(), sort_order:S.clients.length});
+    if(proj.value.trim()) await api.insert('projects',{client_id:cid, name:proj.value.trim()});
+    go({name:'client',id:cid});
   }, 'Add client');
 }
 function openProjectSheet(clientId){
   const name=h('input',{id:'p-name',required:true,placeholder:'e.g. Maintenance, New feature'});
   sheet('New project for '+clientName(clientId),[h('div',{class:'field'},h('label',{for:'p-name'},'Project name'),name)], async ()=>{
     const n=name.value.trim(); if(!n){ $('#sheet-err').textContent='Give the project a name.'; return false; }
-    await db.collection('projects').doc().set({clientId, name:n, createdAt:Date.now()});
+    await api.insert('projects',{client_id:clientId, name:n});
   }, 'Add project');
 }
 $('#fab').addEventListener('click',()=>openMoneySheet(S.view.name==='client'?{clientId:S.view.id}:{}));
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheet(); });
 
-// ---------- data ----------
+// ---------- login ----------
+function renderLogin(v){
+  const email=h('input',{id:'l-email',type:'email',autocomplete:'email',required:true,placeholder:'you@example.com'});
+  const pass=h('input',{id:'l-pass',type:'password',autocomplete:'current-password',required:true});
+  const err=h('div',{class:'err',role:'alert'});
+  const btn=h('button',{class:'btn primary',type:'submit'},'Sign in');
+  const reset=h('button',{class:'linkbtn',type:'button'},'Forgot password?');
+  const form=h('form',{class:'login'},
+    h('h1',null,'Client Ledger'),
+    h('div',{class:'muted'},'Private. Sign in to see your clients and money.'),
+    h('div',{class:'field'},h('label',{for:'l-email'},'Email'),email),
+    h('div',{class:'field'},h('label',{for:'l-pass'},'Password'),pass),
+    err, btn, reset);
+  form.addEventListener('submit',async e=>{
+    e.preventDefault(); err.textContent=''; btn.disabled=true;
+    const { error } = await sb.auth.signInWithPassword({ email:email.value.trim(), password:pass.value });
+    btn.disabled=false;
+    if(error) err.textContent = /invalid/i.test(error.message) ? 'Wrong email or password.' : error.message;
+  });
+  reset.addEventListener('click',async ()=>{
+    err.textContent='';
+    if(!email.value.trim()){ err.textContent='Type your email first, then tap Forgot password.'; return; }
+    const { error } = await sb.auth.resetPasswordForEmail(email.value.trim(), { redirectTo: location.origin + location.pathname });
+    err.textContent = error ? error.message : 'If that email has an account, a reset link is on its way.';
+  });
+  v.appendChild(form); email.focus();
+}
+
+// ---------- data (Supabase) ----------
+const cfg = window.LEDGER_CONFIG || {};
+const sb = (window.supabase && cfg.supabaseUrl && cfg.supabaseAnonKey) ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey) : null;
+const ms = t => t ? Date.parse(t) : 0;
+const TABLES = ['clients','projects','txns'];
+const map = {
+  clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', order:r.sort_order, createdAt:ms(r.created_at) }),
+  projects: r => ({ id:r.id, clientId:r.client_id, name:r.name, createdAt:ms(r.created_at) }),
+  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), note:r.note||'', date:r.date, createdAt:ms(r.created_at) })
+};
+async function load(){
+  const res = await Promise.all(TABLES.map(t=>sb.from(t).select('*')));
+  const bad = res.find(r=>r.error);
+  if(bad){ S.error='Couldn’t load your ledger: '+bad.error.message; render(); return; }
+  TABLES.forEach((t,i)=>{ S[t]=res[i].data.map(map[t]); });
+  S.ready={c:true,p:true,t:true}; S.error=''; render();
+}
+const api = {
+  async insert(table,row){ const { data, error } = await sb.from(table).insert(row).select('id').single(); if(error) throw error; await load(); return data.id; },
+  async del(table,id){ const { error } = await sb.from(table).delete().eq('id',id); if(error) throw error; await load(); }
+};
+function openNewPasswordSheet(){
+  const p=h('input',{id:'np',type:'password',autocomplete:'new-password',minlength:'8',required:true});
+  sheet('Set a new password',[h('div',{class:'field'},h('label',{for:'np'},'New password (8+ characters)'),p)], async ()=>{
+    const { error } = await sb.auth.updateUser({ password:p.value });
+    if(error){ $('#sheet-err').textContent=error.message; return false; }
+  }, 'Save password');
+}
+db = sb;
+$('#signout').addEventListener('click',()=>sb && sb.auth.signOut());
 render();
-(async ()=>{
-  const [d, user] = window.claude ? await Promise.all([window.claude.use('db'), window.claude.use('user')]) : [null,null];
-  db = d;
-  if(!db){ S.error='Sign in to claude.ai to see your ledger.'; render(); return; }
-  if(user){ try{ const ok = await user.canEdit(); if(ok===false) S.canWrite=false; }catch(_){} }
-  const sub = (col,key)=> db.collection(col).onSnapshot(snap=>{
-    S[col] = snap.docs.map(x=>Object.assign({id:x.id}, x.data()));
-    S.ready[key]=true; render();
-  }, e=>{ S.error = e.code==='revoked' ? 'This ledger isn’t available right now.' : 'Couldn’t load your ledger. Reload the page to try again.'; render(); });
-  sub('clients','c'); sub('projects','p'); sub('txns','t');
-})();
+if(!sb){
+  S.authReady=true; S.session={}; S.error='The app isn’t set up yet. Add your Supabase project URL and anon key to config.js.'; render();
+} else {
+  sb.auth.onAuthStateChange((event, session)=>{
+    S.authReady=true; S.session=session;
+    if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
+    if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.ready={c:false,p:false,t:false}; S.view={name:'home'}; closeSheet(); render(); }
+  });
+}
 })();
 </script>
+</html>
