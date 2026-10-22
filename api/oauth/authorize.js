@@ -33,15 +33,17 @@ function check(q) {
   const client = verify('client', q.client_id);
   if (!client) return { error: 'This app isn’t registered with Client Ledger.' };
   if (!q.redirect_uri || !client.ru.includes(q.redirect_uri)) return { error: 'The app’s return address doesn’t match its registration.' };
-  const params = { client_id: q.client_id, redirect_uri: q.redirect_uri, state: q.state || '', code_challenge: q.code_challenge || '',
+  // Everything here goes into the form's hidden fields, so the POST is checked exactly like the GET was.
+  const params = { response_type: q.response_type || '', client_id: q.client_id, redirect_uri: q.redirect_uri, state: q.state || '', code_challenge: q.code_challenge || '',
     code_challenge_method: q.code_challenge_method || '', scope: q.scope || SCOPE, resource: q.resource || '' };
   if (params.resource && !/^https?:\/\/[^/]+(\/api\/mcp)?\/?$/.test(params.resource)) return { client, params, redirectError: 'invalid_target', description: 'Unknown resource.' };
-  if (q.response_type !== 'code') return { client, params, redirectError: 'unsupported_response_type' };
+  if (params.response_type !== 'code') return { client, params, redirectError: 'unsupported_response_type' };
   if (!params.code_challenge || params.code_challenge_method !== 'S256') return { client, params, redirectError: 'invalid_request', description: 'PKCE with S256 is required.' };
   return { client, params };
 }
 
 function redirect(res, base, uri, query) {
+  if (query.error) console.warn('[oauth/authorize] sending the app an error:', query.error, query.error_description || '');
   const u = new URL(uri);
   for (const k in query) if (query[k] != null && query[k] !== '') u.searchParams.set(k, query[k]);
   u.searchParams.set('iss', base);
