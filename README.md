@@ -34,16 +34,44 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 
 ## Ask AI about my projects (MCP server)
 
-`api/mcp/[key].js` is a read-only [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can answer questions like "how much profit did I make this year?", "what does GeekBoz still owe me?" or "what's the live link for the Edustudy website?" from the ledger.
+`api/mcp.js` is an [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can answer questions about the ledger and change it: "how much profit did I make this year?", "add a booking site project for Sweet Crumbs, quoted ₹40,000", "Edustudy paid ₹5,000 today", "mark the GeekBoz website as done". Changes show up on the website the next time it loads.
+
+**Read tools**
 
 | Tool | What it returns |
 |---|---|
 | `get_summary` | Revenue, spending, profit, margin, still to collect, monthly totals, spending by category, top projects, for any period |
-| `list_projects` / `get_project` | Projects with client, status, description, links, dates and money; one project's payments and expenses |
-| `list_clients` / `get_client` | Clients with totals; one client's projects and money |
+| `compare_periods` | Two periods side by side (this vs last month, this vs last year, or any dates) |
+| `get_attention_items` | Overdue and soon-due projects, money owed, open leads, projects on hold, missing quotes and links |
+| `search` | Clients, projects and money entries containing some text |
+| `list_projects` / `get_project` | Projects with client, status, description, links, dates and money; one project's entries |
+| `list_clients` / `get_client` | Clients with totals; one client's projects and entries |
 | `list_transactions` | Payments and expenses, filtered by type, dates, client, project or category |
+| `list_recent_changes` | Changes made through the assistant, and whether they were undone |
 
-It can only read, never change anything.
+**Write tools**
+
+| Tool | What it does |
+|---|---|
+| `create_client` / `update_client` / `delete_client` | Add, edit or delete a client (deleting also removes their projects and money) |
+| `create_project` / `update_project` / `delete_project` | Add a project (with a new client if needed), change any field or move it to another client, or delete it |
+| `add_payment` / `add_expense` / `add_transactions` | Log money in or out, one at a time or many at once |
+| `update_transaction` / `delete_transactions` | Fix or remove money entries |
+| `undo_change` | Revert the latest change, or any earlier one by its `change_id` |
+
+**Safeguards**
+
+- Deletes are two-step: the first call only shows what would be deleted, and nothing happens until it's called again with `confirm: true`.
+- A new client is only created when asked for explicitly, so a misspelt name never creates a duplicate.
+- Bulk adds are checked first. If any entry doesn't match a client or project, nothing is saved.
+- Links must be http(s), dates must be real, and amounts must be positive.
+- Every change is recorded in `activity_log` and can be undone as a whole. Writes refuse to run if that table is missing.
+
+**Sign-in (OAuth 2.1)**
+
+Connecting an app opens a Client Ledger sign-in page (`/api/oauth/authorize`). Sign in with your own email and password and the app gets a 1-hour access token, renewed with a 30-day refresh token, that only reaches your rows.
+
+The server supports discovery (`/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`), dynamic client registration and PKCE, which is what Claude expects. It stores nothing: registrations, codes and tokens are all signed with `OAUTH_SECRET`.
 
 **Setup** (Vercel → Project → Settings → Environment Variables, then redeploy):
 
@@ -51,9 +79,11 @@ It can only read, never change anything.
 |---|---|
 | `SUPABASE_URL` | The Supabase project URL (same as in `config.js`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API keys → the **secret** / `service_role` key. Server-only: never put it in `config.js` |
-| `MCP_SECRET` | A long random string (at least 24 characters). It is part of the server's address, so treat it like a password |
+| `OAUTH_SECRET` | A long random string (at least 32 characters). Changing it signs every connected app out |
 
-The server's address is `https://<your-site>/api/mcp/<MCP_SECRET>`. Any other address returns 404.
+Also run `supabase/schema.sql` again so the `activity_log` table exists.
 
-- **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector, paste the address.
-- **Claude Code:** `claude mcp add --transport http client-ledger https://<your-site>/api/mcp/<MCP_SECRET>`
+**Connect**
+
+- **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector → `https://<your-site>/api/mcp`, then sign in when asked.
+- **Claude Code:** `claude mcp add --transport http client-ledger https://<your-site>/api/mcp`, then `/mcp` to sign in.
