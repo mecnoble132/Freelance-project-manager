@@ -21,7 +21,7 @@ h1{font-size:22px;margin:0}p{margin:0}.muted{color:var(--muted);font-size:14px}.
 ul{margin:0;padding-left:20px;color:var(--muted);font-size:14px}
 label{font-size:13px;font-weight:600;color:var(--muted);display:flex;flex-direction:column;gap:5px}
 input{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
-.row{display:flex;gap:8px}button{flex:1;font:inherit;font-weight:600;border-radius:10px;padding:10px 14px;border:1px solid var(--line);background:var(--panel);color:var(--fg);cursor:pointer}
+.row{display:flex;flex-direction:row-reverse;gap:8px}button{flex:1;font:inherit;font-weight:600;border-radius:10px;padding:10px 14px;border:1px solid var(--line);background:var(--panel);color:var(--fg);cursor:pointer}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 code{font-size:13px;overflow-wrap:anywhere}
 </style><div class="card">${inner}</div></html>`);
@@ -59,7 +59,8 @@ function form(res, c, email, error) {
 <label>Email<input name="email" type="email" autocomplete="email" required value="${esc(email)}"></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
 ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
-<div class="row"><button type="submit" name="action" value="deny" formnovalidate>Cancel</button><button class="primary" type="submit" name="action" value="allow">Sign in and allow</button></div>
+<!-- Allow comes first in the page because pressing Enter (or Go on a phone keyboard) submits with the first button; row-reverse still shows Cancel on the left. -->
+<div class="row"><button class="primary" type="submit" name="action" value="allow">Sign in and allow</button><button type="submit" name="action" value="deny" formnovalidate>Cancel</button></div>
 </form>`);
 }
 
