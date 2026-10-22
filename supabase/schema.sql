@@ -77,3 +77,28 @@ create policy "own txns" on public.txns
   for all to authenticated
   using (user_id = (select auth.uid()))
   with check (user_id = (select auth.uid()));
+
+-- Every change made through the MCP server (AI assistant), so it can be listed and undone.
+create table if not exists public.activity_log (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  batch_id uuid not null,
+  seq integer not null default 0,
+  source text not null default 'mcp',
+  summary text not null default '',
+  op text not null check (op in ('insert', 'update', 'delete')),
+  table_name text not null check (table_name in ('clients', 'projects', 'txns')),
+  row_id uuid not null,
+  before jsonb,
+  after jsonb,
+  undone_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists activity_log_user_idx on public.activity_log (user_id, created_at desc);
+create index if not exists activity_log_batch_idx on public.activity_log (batch_id);
+alter table public.activity_log enable row level security;
+drop policy if exists "own activity" on public.activity_log;
+create policy "own activity" on public.activity_log
+  for all to authenticated
+  using (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
