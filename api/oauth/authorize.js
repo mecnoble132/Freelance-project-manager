@@ -26,7 +26,7 @@ button.primary{background:var(--accent);border-color:var(--accent);color:var(--a
 code{font-size:13px;overflow-wrap:anywhere}
 </style><div class="card">${inner}</div></html>`);
 }
-const errorPage = (res, msg) => page(res, 400, `<h1>Can’t connect</h1><p class="err">${esc(msg)}</p><p class="muted">Go back to the app and try connecting again.</p>`);
+const errorPage = (res, msg) => (console.warn('[oauth/authorize] refused:', msg), page)(res, 400, `<h1>Can’t connect</h1><p class="err">${esc(msg)}</p><p class="muted">Go back to the app and try connecting again.</p>`);
 
 // Checks the request against the signed client registration. Returns { params, client } or { error }.
 function check(q) {
@@ -75,7 +75,7 @@ module.exports = async (req, res) => {
   if (input.action === 'deny') return redirect(res, base, c.params.redirect_uri, { error: 'access_denied', state: c.params.state });
   const email = String(input.email || '').trim().slice(0, 320), password = String(input.password || '');
   const user = email && password ? await signIn(email, password) : null;
-  if (!user) { await new Promise(r => setTimeout(r, 800)); return form(res, c, email, 'Wrong email or password.'); }
+  if (!user) { console.warn('[oauth/authorize] sign-in failed'); await new Promise(r => setTimeout(r, 800)); return form(res, c, email, 'Wrong email or password.'); }
   const code = sign('code', { cid: c.params.client_id, ru: c.params.redirect_uri, cc: c.params.code_challenge, uid: user.id, em: user.email, sc: SCOPE, aud: base + '/api/mcp' }, CODE_TTL);
   redirect(res, base, c.params.redirect_uri, { code, state: c.params.state });
 };

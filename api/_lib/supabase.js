@@ -57,15 +57,19 @@ async function signIn(email, password) {
   return j && j.user ? { id: j.user.id, email: j.user.email } : null;
 }
 
-// Looks a user up by id, so tokens stop working if the account is deleted or banned.
-async function getUser(uid) {
-  if (!UUID.test(String(uid))) return null;
+// Checks an account still exists, so refresh tokens stop working once it's deleted or banned.
+// Returns false only when Supabase clearly says so; if the check itself can't run (for example the key
+// isn't allowed to use the admin API), it logs why and lets the signed token stand.
+async function userStillActive(uid) {
+  if (!UUID.test(String(uid))) return false;
   const { url } = config();
-  const res = await fetch(url + '/auth/v1/admin/users/' + uid, { headers: headers() });
-  if (!res.ok) return null;
-  const u = await res.json();
-  if (!u || !u.id || (u.banned_until && Date.parse(u.banned_until) > Date.now())) return null;
-  return { id: u.id, email: u.email };
+  try {
+    const res = await fetch(url + '/auth/v1/admin/users/' + uid, { headers: headers() });
+    if (res.status === 404) return false;
+    if (!res.ok) { console.warn('[auth] account check skipped: admin API returned', res.status, (await res.text()).slice(0, 200)); return true; }
+    const u = await res.json();
+    return !(u.banned_until && Date.parse(u.banned_until) > Date.now());
+  } catch (e) { console.warn('[auth] account check skipped:', e.message); return true; }
 }
 
-module.exports = { forUser, signIn, getUser, DbError, UUID };
+module.exports = { forUser, signIn, userStillActive, DbError, UUID };
