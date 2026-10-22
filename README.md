@@ -31,3 +31,29 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 4. Authentication → URL Configuration: set the Site URL to where the app is hosted.
 5. Put the project URL and anon key in `config.js` (never the service_role key).
 6. Host the folder anywhere static, such as Vercel.
+
+## Ask AI about my projects (MCP server)
+
+`api/mcp/[key].js` is a read-only [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can answer questions like "how much profit did I make this year?", "what does GeekBoz still owe me?" or "what's the live link for the Edustudy website?" from the ledger.
+
+| Tool | What it returns |
+|---|---|
+| `get_summary` | Revenue, spending, profit, margin, still to collect, monthly totals, spending by category, top projects, for any period |
+| `list_projects` / `get_project` | Projects with client, status, description, links, dates and money; one project's payments and expenses |
+| `list_clients` / `get_client` | Clients with totals; one client's projects and money |
+| `list_transactions` | Payments and expenses, filtered by type, dates, client, project or category |
+
+It can only read, never change anything.
+
+**Setup** (Vercel → Project → Settings → Environment Variables, then redeploy):
+
+| Variable | Value |
+|---|---|
+| `SUPABASE_URL` | The Supabase project URL (same as in `config.js`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API keys → the **secret** / `service_role` key. Server-only: never put it in `config.js` |
+| `MCP_SECRET` | A long random string (at least 24 characters). It is part of the server's address, so treat it like a password |
+
+The server's address is `https://<your-site>/api/mcp/<MCP_SECRET>`. Any other address returns 404.
+
+- **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector, paste the address.
+- **Claude Code:** `claude mcp add --transport http client-ledger https://<your-site>/api/mcp/<MCP_SECRET>`
