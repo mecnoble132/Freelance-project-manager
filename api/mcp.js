@@ -1,6 +1,6 @@
 // MCP server (Streamable HTTP, stateless) so an AI assistant can read and change the ledger.
 // Every request needs an OAuth access token from /api/oauth; the token says whose data to use.
-const { verify, baseUrl, cors, json } = require('./_lib/oauth');
+const { verify, baseUrl, cors, json, logRequest } = require('./_lib/oauth');
 const { forUser } = require('./_lib/supabase');
 const { TOOLS, INSTRUCTIONS } = require('./_lib/tools');
 const { Invalid } = require('./_lib/writes');
@@ -40,6 +40,8 @@ async function handle(msg, db) {
 }
 
 module.exports = async (req, res) => {
+  const seen = [];
+  logRequest(req, res, () => seen.join(', '));
   cors(res);
   if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
   const base = baseUrl(req);
@@ -56,7 +58,9 @@ module.exports = async (req, res) => {
   if (typeof b === 'string' || Buffer.isBuffer(b)) { try { b = JSON.parse(b.toString()); } catch (e) { b = undefined; } }
   if (b == null) return json(res, 400, err(null, -32700, 'Parse error'));
   const db = forUser(token.sub);
+  [].concat(b).forEach(x => seen.push(x && x.method === 'tools/call' ? 'tools/call:' + (x.params && x.params.name) : x && x.method));
   const out = Array.isArray(b) ? (await Promise.all(b.map(x => handle(x, db)))).filter(Boolean) : await handle(b, db);
+  [].concat(out || []).forEach(o => { if (o.error) seen.push('rpc-error:' + o.error.message); else if (o.result && o.result.isError) seen.push('tool-error'); });
   if (!out || (Array.isArray(out) && !out.length)) { res.statusCode = 202; return res.end(); }
   json(res, 200, out);
 };

@@ -1,6 +1,6 @@
 // The page an app (like Claude) sends you to when connecting: sign in with your Client Ledger account and allow access.
 // On success it redirects back to the app with a short-lived, single-purpose code.
-const { sign, verify, esc, body, baseUrl, CODE_TTL, SCOPE } = require('../_lib/oauth');
+const { sign, verify, esc, body, baseUrl, CODE_TTL, SCOPE, logRequest } = require('../_lib/oauth');
 const { signIn } = require('../_lib/supabase');
 
 function page(res, status, inner) {
@@ -64,6 +64,7 @@ ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
 }
 
 module.exports = async (req, res) => {
+  logRequest(req, res, () => req.method === 'POST' ? 'action=' + ((req.body && req.body.action) || '?') : '');
   const base = baseUrl(req);
   if (req.method !== 'GET' && req.method !== 'POST') { res.statusCode = 405; res.setHeader('Allow', 'GET, POST'); return res.end(); }
   const input = req.method === 'POST' ? body(req) : req.query;
