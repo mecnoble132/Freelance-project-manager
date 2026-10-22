@@ -1,4 +1,5 @@
 -- Client Ledger: tables and row-level security.
+-- Run the whole file in the Supabase SQL editor. It is safe to run again, and adds new columns to an existing database.
 -- Every row belongs to the signed-in user who created it, and only that user can read or change it.
 
 create table if not exists public.clients (
@@ -29,6 +30,24 @@ create table if not exists public.txns (
   date date,
   created_at timestamptz not null default now()
 );
+
+-- Dashboard fields (added later). Safe to run again on an existing database.
+alter table public.clients add column if not exists notes text not null default '';
+
+alter table public.projects add column if not exists status text not null default 'active';
+alter table public.projects add column if not exists description text not null default '';
+alter table public.projects add column if not exists quoted numeric(12, 2) not null default 0;
+alter table public.projects add column if not exists preview_url text not null default '';
+alter table public.projects add column if not exists live_url text not null default '';
+alter table public.projects add column if not exists github_url text not null default '';
+alter table public.projects add column if not exists start_date date;
+alter table public.projects add column if not exists due_date date;
+alter table public.projects drop constraint if exists projects_status_check;
+alter table public.projects add constraint projects_status_check check (status in ('lead', 'active', 'paused', 'done'));
+alter table public.projects drop constraint if exists projects_quoted_check;
+alter table public.projects add constraint projects_quoted_check check (quoted >= 0);
+
+alter table public.txns add column if not exists category text not null default '';
 
 create index if not exists clients_user_idx on public.clients (user_id);
 create index if not exists projects_user_idx on public.projects (user_id);
