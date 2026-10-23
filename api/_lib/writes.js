@@ -197,7 +197,7 @@ function entryRow(L, e, i) {
   const where = i === undefined ? '' : 'Entry ' + (i + 1) + ': ';
   const type = e.type === 'out' || e.type === 'expense' ? 'out' : e.type === 'in' || e.type === 'payment' ? 'in' : fail(where + 'type must be "in" (payment) or "out" (expense).');
   const place = placeEntry(L, e);
-  if (place.error) return { error: where + place.error, ...place, error_only: true };
+  if (place.error) return { ...place, error: where + place.error, error_only: true };
   const note = text(e.note, 500);
   return { row: { client_id: place.client_id, project_id: place.project_id, type, amount: money(e.amount, { label: where + 'Amount' }),
     category: type === 'out' ? category(e.category, note) : '', note, date: e.date === undefined ? todayIST() : date(e.date, where + 'Date') }, label: place.label };

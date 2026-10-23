@@ -4,6 +4,8 @@ My personal web app for running my website development service: every client, ev
 
 **Next steps:** see [`ROADMAP.md`](ROADMAP.md) for the planned features, phase by phase, and the rules for building and testing each one.
 
+**Tests:** `node --test tests/*.test.js` and `node --test tests/e2e/*.test.js`. They run offline against a fake Supabase; see [`tests/README.md`](tests/README.md).
+
 ## What it does
 
 - **Dashboard**: revenue, spending, profit and margin for this month, the last 12 months, this year or all time; money still to collect; a month-by-month chart of money in and out; most profitable projects; where the money went by category; recent money

@@ -4,7 +4,7 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 
 | Phase | What | Status |
 |---|---|---|
-| A | Tests, backups, financial year view | Not started |
+| A | Financial year view (the automated tests are done) | Not started |
 | B | Payment milestones | Not started |
 | C | Invoices (UPI QR, TDS) and chasing payments | Not started |
 | D | Renewals and retainers | Not started |
@@ -30,7 +30,7 @@ See `README.md` for features and setup. In short:
   - `api/_lib/writes.js`: every change, input cleaning, the `Change` class (logs to `activity_log`), and undo.
   - `api/_lib/supabase.js`: the only database access. `forUser(uid)` adds `user_id = uid` to every operation.
   - `api/oauth/*`, `api/_lib/oauth.js`: sign-in for MCP clients. Don't touch unless needed.
-- No tests yet; Phase A adds them.
+- Automated tests are in `tests/` (see `tests/README.md`). They run offline against a fake Supabase built from `schema.sql`, and GitHub runs them on every pull request.
 
 Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the only user.
 
@@ -40,9 +40,9 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
 
 ### Releasing a phase
 
-1. Build the phase **with its tests**. Run `node --test tests/`; everything must pass, old tests included.
+1. Build the phase **with its tests** (follow "When you add a feature" in `tests/README.md`). Run `node --test tests/*.test.js` and `node --test tests/e2e/*.test.js`; everything must pass, old tests included, and the GitHub check must be green.
 2. Run `supabase/schema.sql` in the Supabase SQL editor **before** merging (changes only add things, so the live code keeps working). Run it twice: the second run must succeed too.
-3. Merge, then go through the phase's **Check** list on the live site and in Claude, plus section 4. Every calculation in a **Check** list (dates, totals, statuses, undo) must also be an automated test; only the look and feel is checked by hand.
+3. Merge, then go through the phase's **Check** list on the live site and in Claude, plus section 4. Every item in a **Check** list must be an automated test first (server tests for numbers and tools, `tests/e2e/website.test.js` for screens and buttons); on the live site you only glance at it.
 4. If something breaks: Vercel → Deployments → Instant Rollback, then fix on a new branch.
 5. Update `README.md` and the table above.
 
@@ -87,28 +87,14 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
 
 ## 3. Phases
 
-### A. Tests, backups, financial year
+### A. Financial year
 
-- `tests/fake-db.js`: an in-memory stand-in for `forUser()` (same methods; adds `id`, `user_id`, `created_at`; only sees its own user's rows).
-- Tests with `node --test` (no packages):
-  - `ledger.test.js`: summary numbers.
-  - `writes.test.js`: each write tool, including that undo restores everything exactly.
-  - `tools.test.js`: every tool has a unique name, a schema and a `run` function.
-  - `guard.test.js`: no file but `supabase.js` contains `SUPABASE_SERVICE_ROLE_KEY` or `/rest/v1`.
-  - `consistency.test.js`, the main guard against the bugs this codebase invites:
-    - every table the code writes to appears in `schema.sql` and in the `activity_log` list
-    - the project statuses match in all five places, and the categories in both
-    - `index.html`'s `TABLES` and `ledger.js`'s `load()` load the same tables
-    - every table with a project or client column is handled in `deleteProject` / `deleteClient` and in `undoChange`
+The automated tests are already done (`tests/`). This phase is the financial year view.
 
-    Read the files as text; simple regexes are fine.
-  - `mcp.test.js`: call `api/mcp.js` with fake requests (`initialize`, `tools/list`, a `tools/call`, a request without a token gets 401).
-- Add `tests/` and `scripts/` to a `.vercelignore` so they aren't served.
-- `scripts/call-tool.js <user-id> <tool> '<json>'`: runs one tool directly, for checking without Claude.
 - **Financial year (April–March)**:
   - Website: add "This financial year" and "Last financial year" to `PERIODS`, handled in `periodBuckets()` and `inPeriod()`, labelled "FY 2026–27", and make it the default. The Money page shares `PERIODS`.
   - MCP: add `this_fy` / `last_fy` to `PERIODS` and `periodRange()` in `ledger.js`, and a `fy_vs_last_fy` preset to `compare_periods`.
-- **Check**: the dashboard and `get_summary` with `this_fy` give the same totals; 31 March and 1 April land in different years.
+- **Check**: the dashboard and `get_summary` with `this_fy` give the same totals; 31 March and 1 April land in different years; the period pills test in `website.test.js` covers the new pills; `consistency.test.js` checks that the website's and the server's period lists match.
 
 ### B. Payment milestones
 
@@ -193,6 +179,8 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
 ---
 
 ## 4. After every phase, quickly check
+
+The automated tests already cover all of this; on the live site it's a quick look to confirm the release went out.
 
 Sign in and out; dashboard numbers for every period; add, edit and delete a payment; project and client pages open; phone width. In Claude: `get_summary`, one write and its undo, and a delete without `confirm` changes nothing.
 
