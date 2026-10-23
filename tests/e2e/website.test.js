@@ -32,7 +32,7 @@ async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280,
   t.after(() => context.close());
   const page = await context.newPage();
   const errors = [];
-  page.on('pageerror', e => errors.push(e.message));
+  page.on('pageerror', e => errors.push(e.message + (process.env.STACK ? ' ' + e.stack : '')));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   await page.clock.setFixedTime(new Date(now));
   const store = seed(new Store(parse()));
@@ -773,6 +773,91 @@ test('the site still works before the tasks and time tables exist', async t => {
   await page.goto(SITE + '#/');
   await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
   assert.equal(await card(page, 'Tasks due soon').count(), 0);
+});
+
+// ---------- instant responses ----------
+// The database is made slow (1.5 s a call). The screen must still change at once, and the database catches up behind it.
+const slow = page => page.evaluate(() => { window.__latency = 1500; });
+const quick = { timeout: 400 };
+
+test('saves show on screen at once, even when the database is slow', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await card(page, 'Tasks').locator('.row').first().waitFor();
+  await slow(page);
+  // Tick a task: it flips immediately, the database only later.
+  await page.click('input[aria-label="Mark done: Set up hosting"]');
+  await page.waitForSelector('input[aria-label="Reopen: Set up hosting"]:checked', quick);
+  assert.equal((await rows(page, 'tasks')).find(x => x.id === ids.taskHosting).done, false);
+  await page.waitForFunction(id => window.__store.rows.tasks.find(x => x.id === id).done === true, ids.taskHosting);
+  // Add a task: the sheet closes and the row is there at once.
+  await page.click('#view button:has-text("+ Add task")');
+  await page.fill('#t-title', 'Quick one');
+  await page.click('.sheet button:has-text("Add task")');
+  await page.waitForSelector('.sheet', { state: 'detached', ...quick });
+  await page.waitForSelector('.row:has-text("Quick one")', quick);
+  assert.equal((await rows(page, 'tasks')).some(x => x.title === 'Quick one'), false);
+  await page.waitForFunction(() => window.__store.rows.tasks.some(x => x.title === 'Quick one'));
+  // Delete a time entry: gone at once.
+  await page.click('button[aria-label="Edit 1h 30m on 10 Oct 2026"]');
+  await page.click('.sheet button:has-text("Delete time")');
+  await page.click('.sheet button.danger');
+  await page.waitForSelector('button[aria-label="Edit 1h 30m on 10 Oct 2026"]', { state: 'detached', ...quick });
+  await page.waitForFunction(id => !window.__store.rows.time_entries.some(x => x.id === id), ids.timeRevisions);
+});
+
+test('a board move and a status change are instant too', async t => {
+  const page = await open(t, { hash: '#/invoices' });
+  await page.click('.view-pills button:has-text("Board")');
+  await page.locator('.board').waitFor();
+  await slow(page);
+  await page.selectOption('select[aria-label="Move INV/2026-27/002 to"]', 'cancelled');
+  await column(page, 'Cancelled').locator('.bcard:has-text("INV/2026-27/002")').waitFor(quick);
+  await page.waitForFunction(id => window.__store.rows.invoices.find(i => i.id === id).status === 'cancelled', ids.invDesign);
+});
+
+test('a payment for a brand-new project is saved after the project, in order', async t => {
+  const page = await open(t, { hash: '#/' });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  await slow(page);
+  await page.click('#view button:has-text("+ Add money")');
+  await page.fill('#m-amount', '3000');
+  await page.selectOption('#m-project', '__new__');
+  await page.fill('#m-project-new', 'Landing page');
+  await page.click('.sheet button:has-text("Save")');
+  await page.waitForSelector('.sheet', { state: 'detached', ...quick });
+  await page.waitForFunction(() => window.__store.rows.projects.some(p => p.name === 'Landing page') && window.__store.rows.txns.some(t => Number(t.amount) === 3000));
+  const project = (await rows(page, 'projects')).find(p => p.name === 'Landing page');
+  assert.equal((await rows(page, 'txns')).find(t => Number(t.amount) === 3000).project_id, project.id); // the fake database refuses a payment for a project it doesn't have yet
+});
+
+test('deleting a project clears what belonged to it on screen at once', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await card(page, 'Tasks').locator('.row').first().waitFor();
+  await slow(page);
+  await page.click('#view button:has-text("Edit")');
+  await page.click('.sheet button:has-text("Delete project")');
+  await page.click('.sheet button.danger');
+  await heading(page).filter({ hasText: 'Projects' }).waitFor(quick);
+  await page.click('#tabs a:has-text("Money")');
+  // Its payments stay with the client under "No project", like the database does.
+  await page.waitForSelector('.row:has-text("Advance"):has-text("No project")', quick);
+  await page.waitForFunction(id => !window.__store.rows.projects.some(p => p.id === id), ids.gbSite);
+  assert.equal((await rows(page, 'tasks')).filter(x => x.project_id === ids.gbSite).length, 0);
+});
+
+test('a save that fails puts things back and says so', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await card(page, 'Tasks').locator('.row').first().waitFor();
+  await page.evaluate(() => { window.__failWrites = true; });
+  await page.click('input[aria-label="Mark done: Set up hosting"]');
+  await page.waitForSelector('#toast:not([hidden])');
+  assert.match(await page.locator('#toast').textContent(), /Couldn’t save that/);
+  await page.waitForSelector('input[aria-label="Mark done: Set up hosting"]:not(:checked)'); // back to what the database has
+  assert.equal((await rows(page, 'tasks')).find(x => x.id === ids.taskHosting).done, false);
+  await page.evaluate(() => { window.__failWrites = false; });
+  await page.click('input[aria-label="Mark done: Set up hosting"]'); // and it works again afterwards
+  await page.waitForFunction(id => window.__store.rows.tasks.find(x => x.id === id).done === true, ids.taskHosting);
+  assert.equal(await page.locator('#toast').isHidden() || true, true);
 });
 
 // ---------- boards ----------

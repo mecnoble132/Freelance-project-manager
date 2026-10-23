@@ -69,6 +69,20 @@ test('deleting a client or project handles every table that points at it', () =>
   }
 });
 
+test('the website\'s local delete rules match the foreign keys in schema.sql', () => {
+  const src = /const ON_DELETE = \{([\s\S]*?)\n\};/.exec(HTML)[1];
+  const site = [];
+  for (const [, parent, body] of src.matchAll(/([a-z_]+): \[((?:\['[a-z_]+','[a-z_]+','(?:cascade|null)'\],?)+)\]/g)) {
+    for (const [, child, col, how] of body.matchAll(/\['([a-z_]+)','([a-z_]+)','(cascade|null)'\]/g)) site.push(parent + '<-' + child + '.' + col + ' ' + how);
+  }
+  const db = [];
+  for (const [t, def] of Object.entries(schema)) for (const [col, c] of Object.entries(def.columns)) {
+    if (!c.references || c.references.table === 'users' || t === 'activity_log' || c.references.table === 'auth') continue;
+    db.push(c.references.table + '<-' + t + '.' + col + ' ' + (c.references.onDelete === 'set null' ? 'null' : c.references.onDelete));
+  }
+  assert.deepEqual(site.sort(), db.sort(), 'index.html ON_DELETE must list every foreign key in schema.sql with the same cascade / set null');
+});
+
 test('the website only reads columns that exist', () => {
   const map = /const map = \{([\s\S]*?)\n\};/.exec(HTML)[1];
   for (const [, table, body] of map.matchAll(/([a-z_]+): r => \(\{([\s\S]*?)\}\)/g)) {
