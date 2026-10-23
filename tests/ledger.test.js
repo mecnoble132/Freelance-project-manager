@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers/setup');
-const { ids } = require('./helpers/seed');
+const { ids, OWNER } = require('./helpers/seed');
 const { load, todayIST } = require('../api/_lib/ledger');
 
 test('today is worked out in India time', t => {
@@ -42,6 +42,36 @@ test('summary per period; undated entries only count under all time', async t =>
   const range = L.summary({ from: '2026-03-01', to: '2026-03-31' });
   assert.equal(range.revenue, 15000);
   assert.equal(L.summary({ period: 'last_month' }).revenue, 0);
+});
+
+test('financial year runs April to March', async t => {
+  const { db } = setup(t);
+  const L = await load(db);
+  const fy = L.summary({ period: 'this_fy' });
+  assert.deepEqual([fy.period, fy.from, fy.to, fy.revenue, fy.spending], ['FY 2026–27', '2026-04-01', '2027-03-31', 20000, 1000]);
+  assert.match(fy.note, /1 entries have no date/);
+  const last = L.summary({ period: 'last_fy' });
+  assert.deepEqual([last.period, last.from, last.to, last.revenue, last.spending], ['FY 2025–26', '2025-04-01', '2026-03-31', 15000, 500]);
+  const c = L.comparePeriods({ preset: 'fy_vs_last_fy' });
+  assert.deepEqual([c.current.period, c.previous.period, c.change.revenue], ['FY 2026–27', 'FY 2025–26', { difference: 5000, percent: 33 }]);
+});
+
+test('31 March and 1 April land in different financial years', async t => {
+  const { db, store } = setup(t);
+  store.insert('txns', { client_id: ids.geekboz, type: 'in', amount: 100, date: '2026-03-31' }, OWNER);
+  store.insert('txns', { client_id: ids.geekboz, type: 'in', amount: 1, date: '2026-04-01' }, OWNER);
+  let L = await load(db);
+  assert.equal(L.summary({ period: 'last_fy' }).revenue, 15100);
+  assert.equal(L.summary({ period: 'this_fy' }).revenue, 20001);
+  // The year turns over at midnight in India, not UTC.
+  t.mock.timers.setTime(Date.parse('2027-03-31T18:00:00Z')); // 23:30 on 31 March in India
+  L = await load(db);
+  assert.equal(L.summary({ period: 'this_fy' }).from, '2026-04-01');
+  t.mock.timers.setTime(Date.parse('2027-03-31T18:40:00Z')); // 00:10 on 1 April in India
+  L = await load(db);
+  assert.deepEqual([L.summary({ period: 'this_fy' }).from, L.summary({ period: 'last_fy' }).from], ['2027-04-01', '2026-04-01']);
+  t.mock.timers.setTime(Date.parse('2026-02-10T06:30:00Z')); // January to March still belongs to the year that began last April
+  assert.equal((await load(db)).summary({ period: 'this_fy' }).period, 'FY 2025–26');
 });
 
 test('summary groups money by month and ranks projects by profit', async t => {

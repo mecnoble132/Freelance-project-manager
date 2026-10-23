@@ -2,7 +2,7 @@
 const { load, PERIODS, CATEGORIES } = require('./ledger');
 const W = require('./writes');
 
-const period = { type: 'string', enum: PERIODS, description: 'Time period. Defaults to all_time. Ignored when from or to is given.' };
+const period = { type: 'string', enum: PERIODS, description: 'Time period. Defaults to all_time. this_fy / last_fy are Indian financial years (April to March). Ignored when from or to is given.' };
 const day = d => ({ type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$', description: d + ' (YYYY-MM-DD).' });
 const str = d => ({ type: 'string', description: d });
 const obj = (properties, required) => ({ type: 'object', properties, ...(required ? { required } : {}), additionalProperties: false });
@@ -42,7 +42,7 @@ const TOOLS = [
     run: read((l, a) => l.summary(a)) },
   { name: 'compare_periods', title: 'Compare two periods', annotations: RO,
     description: 'Revenue, spending and profit for two periods side by side, with the change. Defaults to this month vs last month.',
-    inputSchema: obj({ preset: { type: 'string', enum: ['month_vs_last_month', 'year_vs_last_year', 'last_12_vs_previous_12'] },
+    inputSchema: obj({ preset: { type: 'string', enum: ['month_vs_last_month', 'fy_vs_last_fy', 'year_vs_last_year', 'last_12_vs_previous_12'], description: 'fy_vs_last_fy = this financial year (April to March) vs the last one.' },
       a_from: day('Current period start'), a_to: day('Current period end'), b_from: day('Previous period start'), b_to: day('Previous period end') }),
     run: read((l, a) => l.comparePeriods(a)) },
   { name: 'get_attention_items', title: 'What needs attention', annotations: RO,
@@ -131,6 +131,7 @@ const TOOLS = [
 
 const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense. All money is in Indian rupees (INR); dates are YYYY-MM-DD in India time.
 Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. Some older entries have no date; they only count under all_time.
+The financial year runs April to March (FY 2026–27 is 2026-04-01 to 2027-03-31). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
 Changing data:
 - Before creating or changing anything, make sure you have the details right. If the user's message was vague, sum up what you're about to save and ask first.
 - Several projects can share a title (many are called "Website"), so name the client too.

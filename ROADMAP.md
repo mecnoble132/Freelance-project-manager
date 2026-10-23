@@ -4,7 +4,7 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 
 | Phase | What | Status |
 |---|---|---|
-| A | Financial year view (the automated tests are done) | Not started |
+| A | Financial year view (the automated tests are done) | Released |
 | B | Payment milestones | Not started |
 | C | Invoices (UPI QR, TDS) and chasing payments | Not started |
 | D | Renewals and retainers | Not started |
