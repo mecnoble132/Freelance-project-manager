@@ -238,6 +238,13 @@ textarea{resize:vertical;min-height:90px}
 .task-check{width:20px;height:20px;flex:none;padding:0;accent-color:var(--accent)}
 .task-done{text-decoration:line-through;color:var(--muted)}
 .head-actions{display:flex;gap:10px;align-items:center}
+.btn[aria-current="page"]{border-color:var(--accent)}
+.settings-page{display:flex;flex-direction:column;gap:20px;max-width:720px}
+.settings-card{gap:14px}
+.save-row{display:flex;gap:12px;align-items:center}
+.saved{color:var(--in);font-weight:600;font-size:13px}
+.warn-note{color:var(--out)}
+.warn-note:empty{display:none}
 .check{display:flex;gap:8px;align-items:center;font-size:14px}
 .check input{width:auto}
 /* Print (Save as PDF): just the invoice, in black on white, on one A4 page. */
@@ -257,7 +264,7 @@ textarea{resize:vertical;min-height:90px}
     <nav class="tabs" id="tabs" aria-label="Sections" hidden>
       <a href="#/">Dashboard</a><a href="#/projects">Projects</a><a href="#/clients">Clients</a><a href="#/money">Money</a><a href="#/invoices">Invoices</a>
     </nav>
-    <button class="btn small" id="signout" type="button" hidden>Sign out</button>
+    <div class="head-actions"><a class="btn small" id="settings-link" href="#/settings" hidden>Settings</a><button class="btn small" id="signout" type="button" hidden>Sign out</button></div>
   </div>
   <div id="view"><div class="empty">Loading your projects and money…</div></div>
 </div>
@@ -275,14 +282,43 @@ let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
 function pref(k,d){ try{ return localStorage.getItem('ledger.'+k) || d; }catch(e){ return d; } }
 function setPref(k,v){ try{ localStorage.setItem('ledger.'+k,v); }catch(e){} }
-const rs = n => '₹' + Math.round(Number(n)||0).toLocaleString('en-IN');
-const signed = n => (n<0?'−':'') + rs(Math.abs(n));
-const compact = n => { const a=Math.abs(n); const f=(x,s)=>(Math.round(x*10)/10).toString().replace(/\.0$/,'')+s; return '₹'+(a>=1e7?f(n/1e7,'Cr'):a>=1e5?f(n/1e5,'L'):a>=1e3?f(n/1e3,'k'):Math.round(n)); };
+// Currencies: one fixed list, the same as CURRENCIES in api/_lib/ledger.js and the checks in supabase/schema.sql (tests/consistency.test.js compares them).
+const CURRENCIES = ['INR','USD','EUR','GBP','AUD','CAD','SGD','AED','NZD','CHF','JPY','ZAR'];
+const LOCALES = [['en-IN','India (1,00,000)'],['en-US','United States'],['en-GB','United Kingdom'],['en-AU','Australia'],['en-CA','Canada']];
+const curOf = c => CURRENCIES.includes(c) ? c : 'INR'; // rows from before currencies existed are rupees
+const validTz = tz => { try{ new Intl.DateTimeFormat('en-CA',{timeZone:tz||'Asia/Kolkata'}); return tz||'Asia/Kolkata'; }catch(e){ return 'Asia/Kolkata'; } };
+// Amounts are written in their own currency and the user's locale. rs: whole units (lists, dashboards); ex: exact (forms, invoices, messages).
+// Amounts in different currencies are never added together: totals are worked out per currency.
+const fmtNum = (n,cur,digits) => { try{ return new Intl.NumberFormat(biz().locale,{style:'currency',currency:cur,minimumFractionDigits:digits,maximumFractionDigits:digits}).format(n); }catch(e){ return cur+' '+n; } };
+const rs = (n,cur) => fmtNum(Math.round(Number(n)||0), curOf(cur||biz().defaultCurrency), 0);
+const ex = (n,cur) => { cur=curOf(cur||biz().defaultCurrency); const x=Math.round((Number(n)||0)*100)/100; return fmtNum(cur==='JPY'?Math.round(x):x, cur, cur==='JPY'||Number.isInteger(x)?0:2); };
+const signed = (n,cur) => (n<0?'−':'') + rs(Math.abs(n),cur);
+const compact = (n,cur) => { cur=curOf(cur||biz().defaultCurrency);
+  if(cur==='INR' && biz().locale==='en-IN'){ const a=Math.abs(n); const f=(x,s)=>(Math.round(x*10)/10).toString().replace(/\.0$/,'')+s; return '₹'+(a>=1e7?f(n/1e7,'Cr'):a>=1e5?f(n/1e5,'L'):a>=1e3?f(n/1e3,'k'):Math.round(n)); } // lakh and crore, as people write rupees in India
+  try{ return new Intl.NumberFormat(biz().locale,{style:'currency',currency:cur,notation:'compact',maximumFractionDigits:1}).format(n); }catch(e){ return cur+' '+Math.round(n); } };
+// The symbol alone (₹, $, €), for labels like "Amount (₹)".
+const curSym = c => { try{ return new Intl.NumberFormat(biz().locale,{style:'currency',currency:curOf(c)}).formatToParts(0).find(x=>x.type==='currency').value; }catch(e){ return c; } };
 const pad = n => String(n).padStart(2,'0');
 const ymd = d => d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
-const today = () => ymd(new Date());
+// "Today" is the date where the user is (their time zone setting), not where the browser happens to be.
+const todayIn = tz => { try{ return new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()); }catch(e){ return ymd(new Date()); } };
+const today = () => todayIn(biz().timezone);
 const parseD = s => { const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d||1); };
-const fmtDate = d => d ? parseD(d).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}) : 'Earlier';
+const nowD = () => parseD(today());
+const fmtDate = d => d ? parseD(d).toLocaleDateString(biz().locale,{day:'numeric',month:'short',year:'numeric'}) : 'Earlier';
+// Money totals per currency, the default currency first: [{cur, earned, spent, profit}]. `extra` adds currencies that should show even with no money.
+function curOrder(list){ const d=biz().defaultCurrency; return [...new Set(list)].sort((a,b)=>a===d?-1:b===d?1:a.localeCompare(b)); }
+function sumsByCur(txns, extra=[]){
+  const curs=curOrder([...txns.map(t=>t.currency),...extra]); if(!curs.length) curs.push(biz().defaultCurrency);
+  return curs.map(c=>({cur:c, ...sumOf(txns.filter(t=>t.currency===c))}));
+}
+const usedCurrencies = () => curOrder([...S.projects,...S.txns,...S.invoices,...S.services].map(x=>x.currency));
+// The currency the dashboard and renewals page are showing: the one picked last, else the default.
+function dashCur(){ const used=usedCurrencies(), want=pref('currency',''), d=biz().defaultCurrency; return used.includes(want) ? want : (!used.length||used.includes(d)) ? d : used[0]; }
+// Pills to switch currency; only there when the user has money in more than one.
+function curPills(cur){ const used=usedCurrencies(); if(used.length<2) return null;
+  return h('div',{class:'pills cur-pills',role:'group','aria-label':'Currency'},used.map(c=>h('button',{type:'button','aria-pressed':String(c===cur),onclick:()=>{ setPref('currency',c); render(); }},c))); }
+const currencySelect = (id,value) => { const el=h('select',{id},CURRENCIES.map(c=>h('option',{value:c},c))); el.value=curOf(value); return el; };
 function h(tag, attrs, ...kids){ const el=document.createElement(tag); if(attrs) for(const k in attrs){ const v=attrs[k]; if(v==null||v===false) continue; if(k==='class') el.className=v; else if(k.startsWith('on')) el.addEventListener(k.slice(2),v); else el.setAttribute(k,v===true?'':v);} kids.flat().forEach(c=>{ if(c==null||c===false) return; el.appendChild(typeof c==='string'||typeof c==='number'?document.createTextNode(String(c)):c); }); return el; }
 function svg(tag, attrs, ...kids){ const el=document.createElementNS('http://www.w3.org/2000/svg',tag); for(const k in attrs||{}) if(attrs[k]!=null) el.setAttribute(k,attrs[k]); kids.flat().forEach(c=>{ if(c!=null) el.appendChild(typeof c==='string'?document.createTextNode(c):c); }); return el; }
 const canWrite = () => !!db;
@@ -309,7 +345,7 @@ const sortClients = arr => arr.slice().sort((a,b)=>(a.order??1e9)-(b.order??1e9)
 const STATUS_ORDER = {active:0,lead:1,paused:2,done:3};
 const sortProjects = arr => arr.slice().sort((a,b)=>(STATUS_ORDER[a.status]??9)-(STATUS_ORDER[b.status]??9) || (b.createdAt||0)-(a.createdAt||0));
 // What a project has brought in, cost, is still owed, and is overdue on its milestones. Leads aren't owed anything yet.
-function projStats(p){ const s=sumOf(S.txns.filter(t=>t.projectId===p.id)); return {...s, quoted:p.quoted||0, due: p.status==='lead' ? 0 : Math.max(0,(p.quoted||0)-s.earned),
+function projStats(p){ const s=sumOf(S.txns.filter(t=>t.projectId===p.id)); return {...s, cur:p.currency, quoted:p.quoted||0, due: p.status==='lead' ? 0 : Math.max(0,(p.quoted||0)-s.earned),
   overdue: projMilestones(p).reduce((a,m)=>a+(m.state==='overdue'?m.left:0),0)}; }
 // The project's money in pays off its milestones in order. One is overdue when its due date has passed and it isn't fully paid. Same rules as ledger.js.
 const cents = n => Math.round(n*100)/100;
@@ -327,16 +363,18 @@ const msName = (i,n) => n===1 ? 'Full payment' : i===0 ? 'Advance' : i===n-1 ? '
 // ---------- routing ----------
 function parseHash(){ const parts=location.hash.replace(/^#\/?/,'').split('/'); const n=parts[0]||'home';
   if((n==='project'||n==='client'||n==='invoice') && parts[1]) return {name:n,id:decodeURIComponent(parts[1])};
-  return {name:['projects','clients','money','invoices','renewals'].includes(n)?n:'home'}; }
+  return {name:['projects','clients','money','invoices','renewals','settings'].includes(n)?n:'home'}; }
 const hrefOf = v => v.name==='home' ? '#/' : '#/'+v.name+(v.id?'/'+encodeURIComponent(v.id):'');
 function go(v){ const href=hrefOf(v); S.view=v; if(location.hash===href) render(); else location.hash=href; } // S.view is set first: the hashchange that follows is async, and a redraw before it must already know where we're going
-window.addEventListener('hashchange',()=>{ S.view=parseHash(); closeSheet(); render(); window.scrollTo(0,0); });
+window.addEventListener('hashchange',()=>{ S.view=parseHash(); S.settingsSaved=null; closeSheet(); render(); window.scrollTo(0,0); });
 
 function render(){
   const v = $('#view'); v.textContent='';
   const signedIn = !!(S.session && S.session.user);
   $('#signout').hidden = !signedIn;
   $('#tabs').hidden = !signedIn || !S.ready;
+  $('#settings-link').hidden = !signedIn || !S.ready;
+  if(S.view.name==='settings') $('#settings-link').setAttribute('aria-current','page'); else $('#settings-link').removeAttribute('aria-current');
   const tab = {project:'projects',client:'clients',invoice:'invoices'}[S.view.name] || S.view.name;
   document.querySelectorAll('#tabs a').forEach(a=>{ if(a.getAttribute('href')===hrefOf({name:tab})) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current'); });
   // On a phone the tabs scroll sideways; keep the current one in view.
@@ -346,69 +384,72 @@ function render(){
   if(!S.session){ return renderLogin(v); }
   if(S.error){ v.appendChild(h('div',{class:'empty'},S.error)); return; }
   if(!S.ready){ v.appendChild(h('div',{class:'empty'},'Loading your projects and money…')); return; }
-  ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney,invoices:renderInvoices,invoice:renderInvoice,renewals:renderRenewals})[S.view.name](v, S.view.id);
+  ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney,invoices:renderInvoices,invoice:renderInvoice,renewals:renderRenewals,settings:renderSettings})[S.view.name](v, S.view.id);
 }
 
 // ---------- dashboard ----------
-// Indian financial years run April to March. fyStart() is the year the current one began: 2026 for FY 2026–27.
-const fyStart = () => { const t=today(); return Number(t.slice(0,4)) - (Number(t.slice(5,7))<4 ? 1 : 0); };
-const fyLabel = y => 'FY '+y+'–'+String(y+1).slice(2);
-const fyRange = y => [y+'-04-01', (y+1)+'-03-31'];
-const PERIODS = [['this_fy',fyLabel(fyStart()),'This financial year'],['last_fy',fyLabel(fyStart()-1),'Last financial year'],['month','This month'],['12m','Last 12 months'],['year','This year'],['all','All time']];
+// A financial year starts on the 1st of the user's chosen month (April by default). fyStart() is the year the current one began:
+// 2026 for FY 2026–27, or for FY 2026 with a January start.
+const fyStart = () => { const t=today(); return Number(t.slice(0,4)) - (Number(t.slice(5,7))<biz().fyStartMonth ? 1 : 0); };
+const fyLabel = y => biz().fyStartMonth===1 ? 'FY '+y : 'FY '+y+'–'+String(y+1).slice(2);
+const fyRange = y => { const sm=biz().fyStartMonth; return [y+'-'+pad(sm)+'-01', sm===1 ? y+'-12-31' : ymd(new Date(y+1,sm-1,0))]; };
+const PERIODS = [['this_fy'],['last_fy'],['month'],['12m'],['year'],['all']];
+const periodInfo = k => ({this_fy:[fyLabel(fyStart()),'This financial year'], last_fy:[fyLabel(fyStart()-1),'Last financial year'], month:['This month'], '12m':['Last 12 months'], year:['This year'], all:['All time']})[k];
 // The chart's buckets for a period: days for this month, months otherwise. A transaction falls in a bucket when its date starts with the key.
 function periodBuckets(p){
-  const now=new Date(), out=[];
-  if(p==='month'){ for(let d=1; d<=now.getDate(); d++){ const dt=new Date(now.getFullYear(),now.getMonth(),d); out.push({key:ymd(dt),label:String(d),long:dt.toLocaleDateString('en-IN',{day:'numeric',month:'short'})}); } return out; }
+  const now=nowD(), out=[], loc=biz().locale, sm=biz().fyStartMonth;
+  if(p==='month'){ for(let d=1; d<=now.getDate(); d++){ const dt=new Date(now.getFullYear(),now.getMonth(),d); out.push({key:ymd(dt),label:String(d),long:dt.toLocaleDateString(loc,{day:'numeric',month:'short'})}); } return out; }
   let start;
   let end=now;
   if(p==='12m') start=new Date(now.getFullYear(),now.getMonth()-11,1);
   else if(p==='year') start=new Date(now.getFullYear(),0,1);
-  else if(p==='this_fy') start=new Date(fyStart(),3,1);
-  else if(p==='last_fy'){ start=new Date(fyStart()-1,3,1); end=new Date(fyStart(),2,1); }
+  else if(p==='this_fy') start=new Date(fyStart(),sm-1,1);
+  else if(p==='last_fy'){ start=new Date(fyStart()-1,sm-1,1); end=new Date(fyStart(),sm-2,1); }
   else { const first=S.txns.map(t=>t.date).filter(Boolean).sort()[0]; start = first ? parseD(first.slice(0,7)+'-01') : new Date(now.getFullYear(),now.getMonth()-11,1);
     const min=new Date(now.getFullYear(),now.getMonth()-11,1); if(start>min) start=min; }
   for(let d=new Date(start.getFullYear(),start.getMonth(),1); d<=end; d=new Date(d.getFullYear(),d.getMonth()+1,1))
-    out.push({key:d.getFullYear()+'-'+pad(d.getMonth()+1),label:d.toLocaleDateString('en-IN',{month:'short'}),long:d.toLocaleDateString('en-IN',{month:'long',year:'numeric'})});
+    out.push({key:d.getFullYear()+'-'+pad(d.getMonth()+1),label:d.toLocaleDateString(loc,{month:'short'}),long:d.toLocaleDateString(loc,{month:'long',year:'numeric'})});
   return out;
 }
-function inPeriod(t,p){ if(p==='all') return true; if(!t.date) return false; const now=new Date();
+function inPeriod(t,p){ if(p==='all') return true; if(!t.date) return false; const now=nowD();
   if(p==='month') return t.date.startsWith(today().slice(0,7));
   if(p==='year') return t.date.startsWith(String(now.getFullYear()));
   if(p==='this_fy'||p==='last_fy'){ const [a,b]=fyRange(fyStart()-(p==='last_fy'?1:0)); return t.date>=a && t.date<=b; }
   return t.date >= ymd(new Date(now.getFullYear(),now.getMonth()-11,1)); }
 
 function renderHome(v){
-  const p=S.period, tx=S.txns.filter(t=>inPeriod(t,p)), all=sumOf(tx);
+  // Everything on the dashboard is in one currency (switch it with the pills when there are several): amounts in different currencies are never added.
+  const cur=dashCur(), p=S.period, mine=S.txns.filter(t=>t.currency===cur), tx=mine.filter(t=>inPeriod(t,p)), all=sumOf(tx), projs=S.projects.filter(x=>x.currency===cur);
   const margin = all.earned>0 ? Math.round(all.profit/all.earned*100) : null;
-  const stats = S.projects.map(pr=>({p:pr,...projStats(pr)}));
+  const stats = projs.map(pr=>({p:pr,...projStats(pr)}));
   const owed = stats.reduce((a,s)=>a+s.due,0);
-  const pipeline = S.projects.filter(x=>x.status==='lead').reduce((a,x)=>a+(x.quoted||0),0);
-  const nActive = S.projects.filter(x=>x.status==='active').length;
-  const nLeads = S.projects.filter(x=>x.status==='lead').length;
+  const pipeline = projs.filter(x=>x.status==='lead').reduce((a,x)=>a+(x.quoted||0),0);
+  const nActive = projs.filter(x=>x.status==='active').length;
+  const nLeads = projs.filter(x=>x.status==='lead').length;
   const pills = h('div',{class:'pills',role:'group','aria-label':'Time period'},
-    PERIODS.map(([k,l,long])=>h('button',{type:'button',title:long,'aria-pressed':String(p===k),onclick:()=>{S.period=k;setPref('period',k);render();}},l)));
+    PERIODS.map(([k])=>{ const [l,long]=periodInfo(k); return h('button',{type:'button',title:long,'aria-pressed':String(p===k),onclick:()=>{S.period=k;setPref('period',k);render();}},l); }));
   add(v,
     h('div',{class:'page-head'},h('h1',null,'Dashboard'),
       canWrite() ? h('div',{class:'actions'},h('button',{class:'btn',onclick:()=>openMoneySheet()},'+ Add money'),h('button',{class:'btn primary',onclick:()=>openProjectSheet()},'+ New project')) : null),
-    h('div',{class:'filters'},pills),
+    h('div',{class:'filters'},pills,curPills(cur)),
     undatedNote(),
     h('div',{class:'kpis'},
-      kpi('Revenue', rs(all.earned), 'Money in', 'in'),
-      kpi('Spending', rs(all.spent), 'Money out', 'out'),
-      kpi('Profit', signed(all.profit), margin==null ? 'No revenue yet' : margin+'% margin', all.profit<0?'out':''),
-      kpi('Still to collect', rs(owed), 'Quoted, not yet paid · all time'),
-      kpi('Projects', String(nActive), 'in progress · '+nLeads+(nLeads===1?' lead':' leads')+(pipeline?' worth '+compact(pipeline):''))));
+      kpi('Revenue', rs(all.earned,cur), 'Money in', 'in'),
+      kpi('Spending', rs(all.spent,cur), 'Money out', 'out'),
+      kpi('Profit', signed(all.profit,cur), margin==null ? 'No revenue yet' : margin+'% margin', all.profit<0?'out':''),
+      kpi('Still to collect', rs(owed,cur), 'Quoted, not yet paid · all time'),
+      kpi('Projects', String(nActive), 'in progress · '+nLeads+(nLeads===1?' lead':' leads')+(pipeline?' worth '+compact(pipeline,cur):''))));
   if(!S.projects.length && !S.txns.length){
     v.appendChild(h('div',{class:'empty'},'Nothing here yet. Add your first project — with its client, links and price — then log payments and expenses against it.'));
     return;
   }
   // chart + side lists
   const buckets = periodBuckets(p);
-  buckets.forEach(b=>{ const s=sumOf(S.txns.filter(t=>(t.date||'').startsWith(b.key))); b.in=s.earned; b.out=s.spent; });
+  buckets.forEach(b=>{ const s=sumOf(mine.filter(t=>(t.date||'').startsWith(b.key))); b.in=s.earned; b.out=s.spent; });
   const chartBox = h('div',{class:'chart',tabindex:'0','aria-label':'Money in and out '+(p==='month'?'by day':'by month')+'. Use the arrow keys to read each '+(p==='month'?'day':'month')+'.'});
   const table = h('details',{class:'tbl'},h('summary',null,'Show as table'),h('div',{class:'tblwrap'},h('table',null,
     h('thead',null,h('tr',null,h('th',null,p==='month'?'Day':'Month'),h('th',null,'Money in'),h('th',null,'Money out'),h('th',null,'Profit'))),
-    h('tbody',null,buckets.slice().reverse().map(b=>h('tr',null,h('td',null,b.long),h('td',{class:'num'},rs(b.in)),h('td',{class:'num'},rs(b.out)),h('td',{class:'num'},signed(b.in-b.out))))))));
+    h('tbody',null,buckets.slice().reverse().map(b=>h('tr',null,h('td',null,b.long),h('td',{class:'num'},rs(b.in,cur)),h('td',{class:'num'},rs(b.out,cur)),h('td',{class:'num'},signed(b.in-b.out,cur))))))));
   const hasChart = buckets.some(b=>b.in||b.out);
   const chartCard = h('div',{class:'card'},
     h('div',{class:'card-head'},h('h2',null,'Money in and out'),
@@ -420,32 +461,32 @@ function renderHome(v){
   const topCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Most profitable projects'),h('span',{class:'sub'},periodLabel(p))));
   if(!top.length) topCard.appendChild(h('div',{class:'empty'},'No project money in this period.'));
   else topCard.appendChild(h('div',{class:'list'},top.map(s=>h('a',{class:'row',href:hrefOf({name:'project',id:s.p.id})},
-    h('div',{class:'grow'},h('div',{class:'title'},s.p.name),h('div',{class:'sub'},clientName(s.p.clientId)+' · '+rs(s.earned)+' in · '+rs(s.spent)+' out')),
-    h('span',{class:'num'+(s.profit<0?' out':'')},signed(s.profit))))));
+    h('div',{class:'grow'},h('div',{class:'title'},s.p.name),h('div',{class:'sub'},clientName(s.p.clientId)+' · '+rs(s.earned,cur)+' in · '+rs(s.spent,cur)+' out')),
+    h('span',{class:'num'+(s.profit<0?' out':'')},signed(s.profit,cur))))));
 
   const owedList = stats.filter(s=>s.due>0).sort((a,b)=>b.due-a.due).slice(0,6);
-  const owedCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Still to collect'),h('span',{class:'num sub'},rs(owed))));
+  const owedCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Still to collect'),h('span',{class:'num sub'},rs(owed,cur))));
   if(!owedList.length) owedCard.appendChild(h('div',{class:'empty'},'Nothing owed. Set a quoted price on a project to track what’s left to collect.'));
   else owedCard.appendChild(h('div',{class:'list'},owedList.map(s=>h('a',{class:'row',href:hrefOf({name:'project',id:s.p.id})},
-    h('div',{class:'grow'},h('div',{class:'title'},s.p.name),h('div',{class:'sub'},clientName(s.p.clientId)+' · '+rs(s.earned)+' of '+rs(s.quoted)+' paid'),s.overdue?h('div',{class:'overdue-note'},rs(s.overdue)+' overdue'):null),
-    h('span',{class:'num'},rs(s.due))))));
+    h('div',{class:'grow'},h('div',{class:'title'},s.p.name),h('div',{class:'sub'},clientName(s.p.clientId)+' · '+rs(s.earned,cur)+' of '+rs(s.quoted,cur)+' paid'),s.overdue?h('div',{class:'overdue-note'},rs(s.overdue,cur)+' overdue'):null),
+    h('span',{class:'num'},rs(s.due,cur))))));
 
   const byCat = {}; tx.filter(t=>t.type==='out').forEach(t=>{ const c=t.category||'Other'; byCat[c]=(byCat[c]||0)+t.amount; });
   const cats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]); const catMax = cats.length?cats[0][1]:0;
   const spendCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Where the money went'),h('span',{class:'sub'},periodLabel(p))));
   if(!cats.length) spendCard.appendChild(h('div',{class:'empty'},'No spending in this period.'));
-  else spendCard.appendChild(h('div',{class:'hbars'},cats.map(([c,n])=>h('div',{class:'hbar'},h('span',null,c),h('span',{class:'num'},rs(n)),
+  else spendCard.appendChild(h('div',{class:'hbars'},cats.map(([c,n])=>h('div',{class:'hbar'},h('span',null,c),h('span',{class:'num'},rs(n,cur)),
     h('div',{class:'track','aria-hidden':'true'},h('span',{style:'width:'+Math.max(2,n/catMax*100)+'%'}))))));
 
-  const rec = sortTx(S.txns).slice(0,8);
+  const rec = sortTx(mine).slice(0,8);
   const recCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Recent money'),h('a',{class:'back',href:'#/money',style:'font-size:13px'},'See all →')));
   if(!rec.length) recCard.appendChild(h('div',{class:'empty'},'Every payment and expense you log shows up here.'));
   else recCard.appendChild(h('div',{class:'list'},rec.map(t=>txRow(t,true))));
 
-  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(),tasksDueCard(),renewalsCard(),owedCard,topCard,spendCard)));
-  drawMoneyChart(chartBox, buckets);
+  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(cur),tasksDueCard(),renewalsCard(),owedCard,topCard,spendCard)));
+  drawMoneyChart(chartBox, buckets, cur);
 }
-const periodLabel = p => (PERIODS.find(x=>x[0]===p)||[])[1];
+const periodLabel = p => (periodInfo(p)||[])[0];
 // Entries without a date can't be placed in a period, so they only count under All time. Say so instead of silently leaving them out.
 function undatedNote(){
   const n=S.txns.filter(t=>!t.date).length;
@@ -457,7 +498,7 @@ function kpi(label, value, sub, tone){ return h('div',{class:'kpi'},h('div',{cla
 
 function niceStep(max, n){ const raw=max/n, pow=Math.pow(10,Math.floor(Math.log10(raw))); for(const m of [1,2,2.5,5,10]) if(m*pow>=raw) return m*pow; return 10*pow; }
 function barPath(x,y,w,hgt){ const r=Math.min(4,w/2,hgt); return 'M'+x+','+(y+hgt)+'V'+(y+r)+'Q'+x+','+y+' '+(x+r)+','+y+'H'+(x+w-r)+'Q'+(x+w)+','+y+' '+(x+w)+','+(y+r)+'V'+(y+hgt)+'Z'; }
-function drawMoneyChart(box, buckets){
+function drawMoneyChart(box, buckets, money){
   const draw = ()=>{
     box.textContent='';
     const W=Math.max(280,box.clientWidth), H=240, m={l:48,r:6,t:10,b:26}, iw=W-m.l-m.r, ih=H-m.t-m.b;
@@ -466,7 +507,7 @@ function drawMoneyChart(box, buckets){
     const step=niceStep(max,4), top=Math.ceil(max/step)*step, y=n=>m.t+ih-(n/top)*ih;
     const n=buckets.length, band=iw/n, bw=Math.max(2,Math.min(22,(band*0.72-2)/2)), gw=bw*2+2;
     const g=svg('svg',{width:W,height:H,viewBox:'0 0 '+W+' '+H,role:'img','aria-hidden':'true'});
-    for(let t=0;t<=top+1e-9;t+=step){ g.append(svg('line',{class:t?'grid':'base',x1:m.l,x2:W-m.r,y1:y(t),y2:y(t)}), svg('text',{x:m.l-8,y:y(t)+4,'text-anchor':'end'},compact(t))); }
+    for(let t=0;t<=top+1e-9;t+=step){ g.append(svg('line',{class:t?'grid':'base',x1:m.l,x2:W-m.r,y1:y(t),y2:y(t)}), svg('text',{x:m.l-8,y:y(t)+4,'text-anchor':'end'},compact(t,money))); }
     const every=Math.ceil(n/Math.max(1,Math.floor(iw/40)));
     const hls=[];
     buckets.forEach((b,i)=>{
@@ -481,7 +522,7 @@ function drawMoneyChart(box, buckets){
     let cur=-1;
     const show=i=>{ if(i===cur) return; if(cur>=0) hls[cur].classList.remove('on'); cur=i; if(i<0){ tip.hidden=true; return; }
       const b=buckets[i]; hls[i].classList.add('on');
-      tip.textContent=''; tip.append(h('b',null,b.long),h('div',null,h('i',{style:'background:var(--c-in)'}),'In '+rs(b.in)),h('div',null,h('i',{style:'background:var(--c-out)'}),'Out '+rs(b.out)),h('div',null,'Profit '+signed(b.in-b.out)));
+      tip.textContent=''; tip.append(h('b',null,b.long),h('div',null,h('i',{style:'background:var(--c-in)'}),'In '+rs(b.in,money)),h('div',null,h('i',{style:'background:var(--c-out)'}),'Out '+rs(b.out,money)),h('div',null,'Profit '+signed(b.in-b.out,money)));
       tip.hidden=false; const cx=m.l+i*band+band/2, tw=tip.offsetWidth;
       tip.style.left=Math.min(W-tw,Math.max(0,cx-tw/2))+'px'; tip.style.top=Math.max(0,y(Math.max(b.in,b.out))-tip.offsetHeight-10)+'px'; };
     const idxAt=e=>{ const r=g.getBoundingClientRect(); const i=Math.floor((e.clientX-r.left-m.l)/band); return i>=0&&i<n?i:-1; };
@@ -542,13 +583,13 @@ function projectCard(p){
     h('p',{class:'desc'},p.description||'No description yet.'),
     links.length ? h('div',{class:'links'},links) : null,
     s.quoted ? h('div',null,
-      h('div',{class:'sub',style:'margin-bottom:4px'},rs(s.earned)+' of '+rs(s.quoted)+' paid'+(s.due?' · '+rs(s.due)+' left':'')),
+      h('div',{class:'sub',style:'margin-bottom:4px'},rs(s.earned,s.cur)+' of '+rs(s.quoted,s.cur)+' paid'+(s.due?' · '+rs(s.due,s.cur)+' left':'')),
       h('div',{class:'progress',role:'img','aria-label':Math.round(pct)+'% paid'},h('span',{style:'width:'+pct+'%'}))) : null,
-    s.overdue ? h('div',{class:'overdue-note'},rs(s.overdue)+' overdue') : null,
+    s.overdue ? h('div',{class:'overdue-note'},rs(s.overdue,s.cur)+' overdue') : null,
     h('div',{class:'mini'},
-      h('div',null,h('span',{class:'l'},'Received'),h('span',{class:'num'},rs(s.earned))),
-      h('div',null,h('span',{class:'l'},'Spent'),h('span',{class:'num'},rs(s.spent))),
-      h('div',null,h('span',{class:'l'},'Profit'),h('span',{class:'num'+(s.profit<0?' out':'')},signed(s.profit)))));
+      h('div',null,h('span',{class:'l'},'Received'),h('span',{class:'num'},rs(s.earned,s.cur))),
+      h('div',null,h('span',{class:'l'},'Spent'),h('span',{class:'num'},rs(s.spent,s.cur))),
+      h('div',null,h('span',{class:'l'},'Profit'),h('span',{class:'num'+(s.profit<0?' out':'')},signed(s.profit,s.cur)))));
 }
 
 function renderProjects(v){
@@ -581,8 +622,8 @@ function projectBoard(list){
     return { key:k, label:l, sub:String(ps.length), cards:ps.map(p=>{ const s=projStats(p);
       return { id:p.id, name:p.name, moves:STATUSES.map(x=>x[0]).filter(x=>x!==k),
         body:[h('a',{class:'title',href:hrefOf({name:'project',id:p.id})},p.name),
-          h('div',{class:'sub'},clientName(p.clientId)+(s.quoted?' · '+rs(s.earned)+' of '+rs(s.quoted)+' paid':'')),
-          s.overdue?h('div',{class:'overdue-note'},rs(s.overdue)+' overdue'):null],
+          h('div',{class:'sub'},clientName(p.clientId)+(s.quoted?' · '+rs(s.earned,s.cur)+' of '+rs(s.quoted,s.cur)+' paid':'')),
+          s.overdue?h('div',{class:'overdue-note'},rs(s.overdue,s.cur)+' overdue'):null],
         chip: p.dueDate&&p.status!=='done' ? h('span',{class:'sub'},'Due '+fmtDate(p.dueDate)) : h('span') }; }) };
   }), (id,to)=>quietly(()=>api.update('projects',id,{status:to})), 'Projects by status');
 }
@@ -600,12 +641,12 @@ function renderProject(v,id){
         h('button',{class:'btn',onclick:()=>openProjectSheet({project:p})},'Edit'),
         h('button',{class:'btn primary',onclick:()=>openMoneySheet({clientId:p.clientId,projectId:p.id})},'+ Add money')):null),
     h('div',{class:'kpis'},
-      kpi('Quoted', s.quoted?rs(s.quoted):'—', s.quoted?'Agreed price':'No price set'),
-      kpi('Received', rs(s.earned), s.quoted?Math.round(Math.min(100,s.earned/s.quoted*100))+'% of quote':'Money in','in'),
-      kpi('Spent', rs(s.spent), 'Money out','out'),
-      kpi('Profit', signed(s.profit), s.earned>0?Math.round(s.profit/s.earned*100)+'% margin':'Received − spent', s.profit<0?'out':''),
-      kpi('Still to collect', rs(s.due), p.status==='lead'?'Lead — not owed yet':s.overdue?rs(s.overdue)+' overdue':'Quoted − received'),
-      time.minutes ? kpi('Earned per hour', rs(time.perHour), fmtMins(time.minutes)+' logged') : null));
+      kpi('Quoted', s.quoted?rs(s.quoted,s.cur):'—', s.quoted?'Agreed price':'No price set'),
+      kpi('Received', rs(s.earned,s.cur), s.quoted?Math.round(Math.min(100,s.earned/s.quoted*100))+'% of quote':'Money in','in'),
+      kpi('Spent', rs(s.spent,s.cur), 'Money out','out'),
+      kpi('Profit', signed(s.profit,s.cur), s.earned>0?Math.round(s.profit/s.earned*100)+'% margin':'Received − spent', s.profit<0?'out':''),
+      kpi('Still to collect', rs(s.due,s.cur), p.status==='lead'?'Lead — not owed yet':s.overdue?rs(s.overdue,s.cur)+' overdue':'Quoted − received'),
+      time.minutes ? kpi('Earned per hour', rs(time.perHour,s.cur), fmtMins(time.minutes)+' logged') : null));
   const links = h('div',{class:'links'},LINKS.map(([k,l,ic,lower])=>p[k]?linkEl(p[k],l+' · '+shortUrl(p[k]),ic):h('span',{class:'link none'},icon(ic),'No '+lower+' link')));
   const about = h('div',{class:'card'},h('h2',null,'About'),
     p.description?h('p',{class:'prose'},p.description):h('p',{class:'muted',style:'margin:0'},'No description yet.'+(canWrite()?' Use Edit to add one.':'')),
@@ -613,7 +654,8 @@ function renderProject(v,id){
     h('div',{class:'facts'},
       h('div',null,h('span',{class:'l'},'Started'),p.startDate?fmtDate(p.startDate):'—'),
       h('div',null,h('span',{class:'l'},'Due'),p.dueDate?fmtDate(p.dueDate):'—'),
-      h('div',null,h('span',{class:'l'},'Added'),new Date(p.createdAt).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}))));
+      h('div',null,h('span',{class:'l'},'Added'),new Date(p.createdAt).toLocaleDateString(biz().locale,{day:'numeric',month:'short',year:'numeric',timeZone:biz().timezone})),
+      h('div',null,h('span',{class:'l'},'Currency'),p.currency)));
   const money = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Money'),h('span',{class:'sub'},tx.length+(tx.length===1?' entry':' entries'))));
   if(!tx.length) money.appendChild(h('div',{class:'empty'},'No money logged for this project yet.'));
   else money.appendChild(h('div',{class:'list'},tx.map(t=>txRow(t,false))));
@@ -633,9 +675,9 @@ function milestonesCard(p){
   if(!ms.length){ card.appendChild(h('div',{class:'empty'},'Split the price into stages, like 50% upfront and 50% at launch, to see what’s paid and what’s overdue.')); return card; }
   card.appendChild(h('div',{class:'list'},ms.map(m=>h('div',{class:'row'},
     h('div',{class:'grow'},h('div',{class:'title'},m.name||'Milestone'),
-      h('div',{class:'sub'},[m.dueDate?'Due '+fmtDate(m.dueDate):'No due date', m.state==='part-paid'||m.state==='overdue'&&m.paid?rs(m.paid)+' of '+rs(m.amount)+' paid':null].filter(Boolean).join(' · '))),
-    h('div',{class:'right'},h('span',{class:'num'},rs(m.amount)),h('span',{class:'state '+m.state},MS_STATES[m.state]),milestoneInvoice(p,m))))));
-  if(p.quoted && cents(total)!==cents(p.quoted)) card.appendChild(h('div',{class:'hint'},'The milestones add up to '+rs(total)+', but the quote is '+rs(p.quoted)+'.'));
+      h('div',{class:'sub'},[m.dueDate?'Due '+fmtDate(m.dueDate):'No due date', m.state==='part-paid'||m.state==='overdue'&&m.paid?rs(m.paid,p.currency)+' of '+rs(m.amount,p.currency)+' paid':null].filter(Boolean).join(' · '))),
+    h('div',{class:'right'},h('span',{class:'num'},rs(m.amount,p.currency)),h('span',{class:'state '+m.state},MS_STATES[m.state]),milestoneInvoice(p,m))))));
+  if(p.quoted && cents(total)!==cents(p.quoted)) card.appendChild(h('div',{class:'hint'},'The milestones add up to '+ex(total,p.currency)+', but the quote is '+ex(p.quoted,p.currency)+'.'));
   return card;
 }
 
@@ -677,7 +719,7 @@ function tasksCard(p){
 function timeCard(p){
   const es=S.time_entries.filter(e=>e.projectId===p.id).sort((a,b)=>(b.date||'').localeCompare(a.date||'')||b.createdAt-a.createdAt), tm=projTime(p);
   const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Time'),
-    h('div',{class:'head-actions'},tm.minutes?h('span',{class:'sub'},fmtMins(tm.minutes)+' · '+rs(tm.perHour)+' an hour'):null,
+    h('div',{class:'head-actions'},tm.minutes?h('span',{class:'sub'},fmtMins(tm.minutes)+' · '+rs(tm.perHour,p.currency)+' an hour'):null,
       canWrite()?h('button',{class:'btn small',type:'button',onclick:()=>openTimeSheet(p)},'Log time'):null)));
   if(!es.length){ card.appendChild(h('div',{class:'empty'},'Log the hours you spend to see what this project really earns per hour.')); return card; }
   card.appendChild(h('div',{class:'list'},es.map(e=>{
@@ -731,18 +773,19 @@ function renderClients(v){
   const clients=sortClients(S.clients);
   if(!clients.length){ v.appendChild(h('div',{class:'empty'},'No clients yet. Add one here, or while creating a project.')); return; }
   v.appendChild(h('div',{class:'list'},clients.map(c=>{
-    const s=sumOf(S.txns.filter(t=>t.clientId===c.id)); const ps=S.projects.filter(p=>p.clientId===c.id);
+    const ps=S.projects.filter(p=>p.clientId===c.id), sums=sumsByCur(S.txns.filter(t=>t.clientId===c.id), ps.map(p=>p.currency));
     const nOpen=ps.filter(p=>p.status!=='done').length;
     return h('a',{class:'row',href:hrefOf({name:'client',id:c.id})},
       h('div',{class:'avatar','aria-hidden':'true'},(c.name||'?').trim().charAt(0).toUpperCase()),
-      h('div',{class:'grow'},h('div',{class:'title'},c.name),h('div',{class:'sub'},[ps.length+(ps.length===1?' project':' projects')+(nOpen?' ('+nOpen+' open)':''),rs(s.earned)+' in',c.contact].filter(Boolean).join(' · '))),
-      h('div',{class:'right'},h('span',{class:'num'+(s.profit<0?' out':'')},signed(s.profit)),h('span',{class:'sub'},'profit')));
+      h('div',{class:'grow'},h('div',{class:'title'},c.name),h('div',{class:'sub'},[ps.length+(ps.length===1?' project':' projects')+(nOpen?' ('+nOpen+' open)':''),sums.map(x=>rs(x.earned,x.cur)).join(' + ')+' in',c.contact].filter(Boolean).join(' · '))),
+      h('div',{class:'right'},sums.map(x=>h('span',{class:'num'+(x.profit<0?' out':'')},signed(x.profit,x.cur))),h('span',{class:'sub'},'profit')));
   })));
 }
 function renderClient(v,id){
   const c=clientOf(id); if(!c){ go({name:'clients'}); return; }
-  const tx=S.txns.filter(t=>t.clientId===id), s=sumOf(tx), ps=sortProjects(S.projects.filter(p=>p.clientId===id));
-  const owed=ps.reduce((a,p)=>a+projStats(p).due,0);
+  const tx=S.txns.filter(t=>t.clientId===id), ps=sortProjects(S.projects.filter(p=>p.clientId===id));
+  const sums=sumsByCur(tx, ps.map(p=>p.currency)), per=f=>sums.map(f).join(' · '); // one figure per currency, never added together
+  const owedBy=x=>ps.filter(p=>p.currency===x.cur).reduce((a,p)=>a+projStats(p).due,0);
   add(v,
     h('a',{class:'back',href:'#/clients'},'← All clients'),
     h('div',{class:'page-head'},
@@ -752,8 +795,8 @@ function renderClient(v,id){
         h('button',{class:'btn',onclick:()=>openMoneySheet({clientId:id})},'+ Add money'),
         h('button',{class:'btn primary',onclick:()=>openProjectSheet({clientId:id})},'+ New project')):null),
     h('div',{class:'kpis'},
-      kpi('Revenue',rs(s.earned),'Money in','in'), kpi('Spending',rs(s.spent),'Money out','out'),
-      kpi('Profit',signed(s.profit),'From this client',s.profit<0?'out':''), kpi('Still to collect',rs(owed),ps.length+(ps.length===1?' project':' projects'))),
+      kpi('Revenue',per(x=>rs(x.earned,x.cur)),'Money in','in'), kpi('Spending',per(x=>rs(x.spent,x.cur)),'Money out','out'),
+      kpi('Profit',per(x=>signed(x.profit,x.cur)),'From this client',sums.some(x=>x.profit<0)?'out':''), kpi('Still to collect',per(x=>rs(owedBy(x),x.cur)),ps.length+(ps.length===1?' project':' projects'))),
     c.notes?h('div',{class:'card'},h('h2',null,'Notes'),h('p',{class:'prose'},c.notes)):null);
   const sec=h('div',{class:'sec'},h('div',{class:'sec-head'},h('h2',null,'Projects')));
   if(!ps.length) sec.appendChild(h('div',{class:'empty'},'No projects for '+c.name+' yet.'));
@@ -776,8 +819,8 @@ function txRow(t, showClient, showProject){
   if(t.type==='out' && t.category && t.note && t.note.toLowerCase()!==t.category.toLowerCase()) bits.push(t.category); bits.push(fmtDate(t.date));
   const kids=[h('span',{class:'dot '+(t.type==='out'?'out':'in'),'aria-hidden':'true'}),
     h('div',{class:'grow'},h('div',{class:'title'},label),h('div',{class:'sub'},bits.join(' · '))),
-    h('span',{class:'num '+(t.type==='out'?'out':'in')},(t.type==='out'?'−':'+')+rs(t.amount))];
-  return canWrite() ? h('button',{class:'row',type:'button','aria-label':'Edit '+label+', '+rs(t.amount),onclick:()=>openMoneySheet({txn:t})},kids) : h('div',{class:'row'},kids);
+    h('span',{class:'num '+(t.type==='out'?'out':'in')},(t.type==='out'?'−':'+')+rs(t.amount,t.currency))];
+  return canWrite() ? h('button',{class:'row',type:'button','aria-label':'Edit '+label+', '+rs(t.amount,t.currency),onclick:()=>openMoneySheet({txn:t})},kids) : h('div',{class:'row'},kids);
 }
 function renderMoney(v){
   const list=h('div',{class:'sec'});
@@ -785,8 +828,8 @@ function renderMoney(v){
     list.textContent='';
     const q=S.mQuery.trim().toLowerCase();
     const tx=sortTx(S.txns).filter(t=>(S.mType==='all'||t.type===S.mType) && inPeriod(t,S.period) && (!q||(t.note+' '+t.category+' '+clientName(t.clientId)+' '+projName(t.projectId)).toLowerCase().includes(q)));
-    const s=sumOf(tx);
-    list.appendChild(h('div',{class:'sub',style:'white-space:normal'},tx.length+(tx.length===1?' entry':' entries')+' · ',h('span',{class:'num in'},rs(s.earned)),' in · ',h('span',{class:'num out'},rs(s.spent)),' out · ',h('span',{class:'num'},signed(s.profit)),' profit'));
+    // One line of totals per currency, never added together.
+    list.appendChild(h('div',{class:'sub',style:'white-space:normal'},tx.length+(tx.length===1?' entry':' entries')+' · ',sumsByCur(tx).map((s,i)=>[i?' · ':null,h('span',{class:'num in'},rs(s.earned,s.cur)),' in · ',h('span',{class:'num out'},rs(s.spent,s.cur)),' out · ',h('span',{class:'num'},signed(s.profit,s.cur)),' profit']).flat()));
     if(!tx.length) list.appendChild(h('div',{class:'empty'},S.txns.length?'No entries match.':'No money logged yet.'));
     else list.appendChild(h('div',{class:'list'},tx.map(t=>txRow(t,true))));
   };
@@ -795,7 +838,7 @@ function renderMoney(v){
     h('div',{class:'page-head'},h('h1',null,'Money'),canWrite()?h('button',{class:'btn primary',onclick:()=>openMoneySheet()},'+ Add money'):null),
     h('div',{class:'filters'},
       h('div',{class:'pills',role:'group','aria-label':'Type'},[['all','All'],['in','Money in'],['out','Money out']].map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.mType===k),onclick:()=>{S.mType=k;render();}},l))),
-      h('div',{class:'pills',role:'group','aria-label':'Time period'},PERIODS.map(([k,l,long])=>h('button',{type:'button',title:long,'aria-pressed':String(S.period===k),onclick:()=>{S.period=k;setPref('period',k);render();}},l))),
+      h('div',{class:'pills',role:'group','aria-label':'Time period'},PERIODS.map(([k])=>{ const [l,long]=periodInfo(k); return h('button',{type:'button',title:long,'aria-pressed':String(S.period===k),onclick:()=>{S.period=k;setPref('period',k);render();}},l); })),
       search),
     undatedNote(),
     list);
@@ -850,6 +893,10 @@ function openProjectSheet(pre={}){
   const client=clientPicker('p-client', p?p.clientId:pre.clientId);
   const status=h('select',{id:'p-status'},STATUSES.map(([k,l])=>h('option',{value:k},l))); status.value=p?p.status:'active';
   const quoted=h('input',{id:'p-quoted',type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'0',value:p&&p.quoted?p.quoted:''});
+  // A project has one currency, and so does everything attached to it, so it is fixed once anything is attached.
+  const cur=currencySelect('p-cur', p?p.currency:biz().defaultCurrency);
+  const attached=!!p && (S.txns.some(t=>t.projectId===p.id) || S.invoices.some(i=>i.projectId===p.id) || S.services.some(x=>x.projectId===p.id) || S.milestones.some(m=>m.projectId===p.id));
+  cur.disabled=attached;
   const start=h('input',{id:'p-start',type:'date',value:p?(p.startDate||''):today()});
   const due=h('input',{id:'p-due',type:'date',value:p?(p.dueDate||''):''});
   const urls=LINKS.map(([k,l])=>h('input',{id:'p-'+k,type:'url',inputmode:'url',autocapitalize:'off',spellcheck:'false',placeholder:k==='githubUrl'?'github.com/you/repo':'example.com',value:p?p[k]:''}));
@@ -857,7 +904,8 @@ function openProjectSheet(pre={}){
   sheet(editing?'Edit project':'New project',[
     field('p-name','Project title',title),
     h('div',{class:'field'},h('label',{for:'p-client'},'Client'),client.sel,client.box),
-    h('div',{class:'two'},field('p-status','Status',status),field('p-quoted','Quoted price (₹)',quoted,'What the client agreed to pay')),
+    h('div',{class:'two'},field('p-status','Status',status),field('p-cur','Currency',cur,attached?'Fixed: it already has payments, invoices, renewals or milestones in '+p.currency+'.':'Every payment and invoice on this project is in it.')),
+    field('p-quoted','Quoted price',quoted,'What the client agreed to pay, in the project’s currency'),
     h('div',{class:'two'},field('p-start','Start date',start),field('p-due','Due date',due)),
     h('div',{class:'three'},LINKS.map(([k,l],i)=>field('p-'+k,l+' link',urls[i]))),
     field('p-desc','Description',desc)
@@ -866,7 +914,7 @@ function openProjectSheet(pre={}){
     const q=quoted.value===''?0:Number(quoted.value); if(!(q>=0)) return fail('The quoted price can’t be negative.');
     const links={}; for(let i=0;i<LINKS.length;i++){ const u=cleanUrl(urls[i].value); if(u===null) return fail('The '+LINKS[i][3]+' link doesn’t look like a web address.'); links[LINKS[i][0]]=u; }
     const cid=await client.resolve(); if(!cid) return false;
-    const row={client_id:cid, name:n, status:status.value, quoted:q, start_date:start.value||null, due_date:due.value||null,
+    const row={client_id:cid, name:n, status:status.value, quoted:q, currency:cur.value, start_date:start.value||null, due_date:due.value||null,
       preview_url:links.previewUrl, live_url:links.liveUrl, github_url:links.githubUrl, description:desc.value.trim()};
     if(editing){ await api.update('projects',p.id,row); }
     else { const id=await api.insert('projects',row); go({name:'project',id}); }
@@ -879,11 +927,11 @@ function openProjectSheet(pre={}){
 // Edits a project's whole milestone list: quick splits of the quote, or rows typed by hand. Saving replaces the old list.
 // With a quote, the last row holds the rest of it: it updates as the others are typed, and new rows go in above it.
 function openMilestonesSheet(p){
-  const quote=p.quoted||0, old=projMilestones(p);
+  const quote=p.quoted||0, old=projMilestones(p), cu=p.currency;
   const box=h('div',{class:'msrows'}), total=h('div',{class:'total',role:'status'});
   let rows=[], rest=null;
   const amountOf = r => Number(r.amt.value)||0;
-  const saved = () => rows.filter(r=>r!==rest || amountOf(r)>0); // a rest of ₹0 isn't saved
+  const saved = () => rows.filter(r=>r!==rest || amountOf(r)>0); // a rest of zero isn't saved
   const sync=()=>{
     if(rest){
       const left=cents(quote-rows.filter(r=>r!==rest).reduce((a,r)=>a+amountOf(r),0));
@@ -892,15 +940,15 @@ function openMilestonesSheet(p){
       rest.note.textContent = left>0 ? 'The rest of the quote. It updates as you type the others.' : 'Nothing left: the milestones above cover the quote, so this one won’t be saved.';
     }
     const kept=saved();
-    rows.forEach((r,i)=>{ r.name.placeholder=kept.includes(r)?msName(kept.indexOf(r),kept.length):''; r.name.setAttribute('aria-label','Milestone '+(i+1)+' name'); r.amt.setAttribute('aria-label','Milestone '+(i+1)+' amount (₹)'); r.due.setAttribute('aria-label','Milestone '+(i+1)+' due date'); });
+    rows.forEach((r,i)=>{ r.name.placeholder=kept.includes(r)?msName(kept.indexOf(r),kept.length):''; r.name.setAttribute('aria-label','Milestone '+(i+1)+' name'); r.amt.setAttribute('aria-label','Milestone '+(i+1)+' amount ('+curSym(cu)+')'); r.due.setAttribute('aria-label','Milestone '+(i+1)+' due date'); });
     const keep=saved(), sum=cents(keep.reduce((a,r)=>a+amountOf(r),0)), off=quote && sum!==cents(quote);
     total.textContent = !keep.length ? 'No milestones. Saving removes them all.'
-      : 'Total '+rs(sum)+(!quote?'':!off?' — matches the quote':sum>quote?' — '+rs(sum-quote)+' more than the '+rs(quote)+' quote':' — the quote is '+rs(quote));
+      : 'Total '+ex(sum,cu)+(!quote?'':!off?' — matches the quote':sum>quote?' — '+ex(sum-quote,cu)+' more than the '+ex(quote,cu)+' quote':' — the quote is '+ex(quote,cu));
     total.className='total'+(off&&keep.length?' warn':'');
   };
   const addRow=(m={},auto)=>{
     const r={ name:h('input',{value:m.name||''}),
-      amt:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Amount (₹)',value:m.amount||'',readonly:!!auto}),
+      amt:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Amount ('+curSym(cu)+')',value:m.amount||'',readonly:!!auto}),
       due:h('input',{type:'date',value:m.dueDate||''}) };
     r.amt.addEventListener('input',sync);
     r.note = auto ? h('div',{class:'hint auto-note'}) : null;
@@ -912,7 +960,7 @@ function openMilestonesSheet(p){
     return r;
   };
   const reset=()=>{ const dues=rows.map(r=>r.due.value); rows=[]; rest=null; box.textContent=''; return dues; };
-  // Whole rupees; the last part is the rest, so the total is exactly the quote (as in writes.js).
+  // Whole units; the last part is the rest, so the total is exactly the quote (as in writes.js).
   const split=parts=>{ const dues=reset();
     parts.forEach((x,i)=>{ const last=i===parts.length-1; addRow({name:msName(i,parts.length),amount:last?'':Math.round(quote*x/100),dueDate:dues[i]},last); }); sync(); };
   const custom=()=>{ const dues=reset(); const first=addRow({name:'Advance',dueDate:dues[0]}); if(quote) addRow({name:'Final payment',dueDate:dues[1]},true); sync(); return first; };
@@ -921,7 +969,7 @@ function openMilestonesSheet(p){
   else custom();
   sync();
   sheet('Payment milestones',[
-    h('p',{class:'muted',style:'margin:0'},p.name+(quote?' · quoted '+rs(quote):' · no quoted price yet')),
+    h('p',{class:'muted',style:'margin:0'},p.name+(quote?' · quoted '+ex(quote,cu):' · no quoted price yet')),
     h('div',{class:'splits',role:'group','aria-label':'Quick splits'},
       [['50 / 50',[50,50]],['50 / 30 / 20',[50,30,20]]].map(([l,parts])=>h('button',{class:'btn small',type:'button',disabled:!quote,onclick:()=>split(parts)},l)),
       h('button',{class:'btn small',type:'button',onclick:()=>custom().amt.focus()},'Custom')),
@@ -932,7 +980,7 @@ function openMilestonesSheet(p){
   ], async ()=>{
     const keep=saved(), list=[];
     for(let i=0;i<keep.length;i++){ const r=keep[i], amount=amountOf(r);
-      if(!(amount>0)) return fail('Milestone '+(rows.indexOf(r)+1)+' needs an amount above ₹0.');
+      if(!(amount>0)) return fail('Milestone '+(rows.indexOf(r)+1)+' needs an amount above '+ex(0,cu)+'.');
       list.push({project_id:p.id, name:r.name.value.trim()||msName(i,keep.length), amount, due_date:r.due.value||null, sort_order:i}); }
     await api.replaceMilestones(old.map(m=>m.id), list);
   }, 'Save milestones', {noFocus:true});
@@ -960,8 +1008,9 @@ function openMoneySheet(pre={}){
   let type=t?t.type:'in';
   const segIn = h('button',{type:'button',class:'in'},'Money in');
   const segOut = h('button',{type:'button',class:'out'},'Money out');
-  const amount = h('input',{id:'m-amount',class:'amount',type:'number',inputmode:'decimal',min:'1',step:'any',required:true,placeholder:'0',value:t?t.amount:(pre.amount||'')});
+  const amount = h('input',{id:'m-amount',class:'amount',type:'number',inputmode:'decimal',min:'0.01',step:'any',required:true,placeholder:'0',value:t?t.amount:(pre.amount||'')});
   const forInv = pre.invoice || (t && t.invoiceId && S.invoices.find(i=>i.id===t.invoiceId));
+  const cur = currencySelect('m-cur', t ? t.currency : forInv ? forInv.currency : biz().defaultCurrency);
   const client = clientPicker('m-client', t?t.clientId:pre.clientId);
   const pSel = h('select',{id:'m-project'});
   const pNew = h('input',{id:'m-project-new',placeholder:'New project title','aria-label':'New project title'});
@@ -983,12 +1032,15 @@ function openMoneySheet(pre={}){
     pSel.value = want && ps.some(p=>p.id===want) ? want : ((t && !t.projectId) || (pre.invoice && !pre.invoice.projectId) ? '' : (ps[0]?ps[0].id:NEW)); // a payment goes where its invoice is
     pNew.hidden = pSel.value!==NEW;
   }
-  client.sel.addEventListener('change',fillProjects);
-  pSel.onchange=()=>{ pNew.hidden = pSel.value!==NEW; };
-  fillProjects();
+  // Money is in the currency of its project or invoice; with neither, pick one.
+  const lockCur = () => { if(forInv) return forInv.currency; const pr=pSel.value&&pSel.value!==NEW?projOf(pSel.value):null; return pr?pr.currency:null; };
+  const syncCur = () => { const l=lockCur(); if(l){ cur.value=l; cur.disabled=true; } else cur.disabled=false; };
+  client.sel.addEventListener('change',()=>{ fillProjects(); syncCur(); });
+  pSel.onchange=()=>{ pNew.hidden = pSel.value!==NEW; syncCur(); };
+  fillProjects(); syncCur();
   sheet(editing?'Edit entry':'Add money', [
     forInv ? h('div',{class:'notice'},'Payment for invoice '+forInv.number) : h('div',{class:'seg',role:'group','aria-label':'Type'},segIn,segOut),
-    field('m-amount','Amount (₹)',amount),
+    h('div',{class:'two'},field('m-amount','Amount',amount),field('m-cur','Currency',cur,lockCur()?'Same as its '+(forInv?'invoice':'project'):null)),
     h('div',{class:'two'},
       h('div',{class:'field'},h('label',{for:'m-client'},'Client'),client.sel,client.box),
       h('div',{class:'field'},h('label',{for:'m-project'},'Project'),pSel,pNew)),
@@ -996,23 +1048,27 @@ function openMoneySheet(pre={}){
     h('div',{class:'two'},field('m-note','What for',note),field('m-date','Date',date))
   ], async ()=>{
     const amt = Number(amount.value);
-    if(!(amt>0)) return fail('Enter an amount above ₹0.');
+    if(!(amt>0)) return fail('Enter an amount above '+ex(0,cur.value)+'.');
+    const lock=lockCur();
+    if(editing && lock && t.currency!==lock) return fail((forInv?inv0Name(forInv):'That project')+' is in '+lock+'; this '+(type==='in'?'payment':'expense')+' is in '+t.currency+'. Money has to be in the same currency as its '+(forInv?'invoice':'project')+'.');
     if(pSel.value===NEW && !pNew.value.trim()) return fail('Type a title for the new project.');
     const clientId = await client.resolve(); if(!clientId) return false;
     let projectId = pSel.value || null;
-    if(projectId===NEW) projectId = await api.insert('projects',{client_id:clientId, name:pNew.value.trim()});
-    const row={client_id:clientId, project_id:projectId, type, amount:amt, category:type==='out'?cat.value:'', note:note.value.trim(), date:date.value||null};
+    if(projectId===NEW) projectId = await api.insert('projects',{client_id:clientId, name:pNew.value.trim(), currency:cur.value});
+    const row={client_id:clientId, project_id:projectId, type, amount:amt, currency:cur.value, category:type==='out'?cat.value:'', note:note.value.trim(), date:date.value||null};
     if(pre.invoice) row.invoice_id=pre.invoice.id;
     if(editing) await api.update('txns',t.id,row); else await api.insert('txns',row);
-  }, editing?'Save changes':'Save', editing?{onDelete:()=>confirmSheet('Delete this entry?', (t.type==='out'?'−':'+')+rs(t.amount)+(t.note?' · '+t.note:'')+' · '+fmtDate(t.date), 'Delete entry', async()=>{ await api.del('txns',t.id); }), deleteLabel:'Delete entry'}:{});
+  }, editing?'Save changes':'Save', editing?{onDelete:()=>confirmSheet('Delete this entry?', (t.type==='out'?'−':'+')+rs(t.amount,t.currency)+(t.note?' · '+t.note:'')+' · '+fmtDate(t.date), 'Delete entry', async()=>{ await api.del('txns',t.id); }), deleteLabel:'Delete entry'}:{});
 }
+const inv0Name = inv => inv.number;
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheet(); });
 
 // ---------- invoices ----------
 const biz = () => S.settings[0] || map.settings({});
 const invOf = id => S.invoices.find(i=>i.id===id);
 // PREFIX/2026-27/001: counts up within each financial year and is never reused (same as ledger.js).
-const fyOfDate = d => { const y=Number(d.slice(0,4)), st=Number(d.slice(5,7))>=4?y:y-1; return st+'-'+String(st+1).slice(2); };
+// A January start numbers by calendar year (PREFIX/2026/001).
+const fyOfDate = d => { const sm=biz().fyStartMonth, y=Number(d.slice(0,4)), st=Number(d.slice(5,7))>=sm?y:y-1; return sm===1 ? String(st) : st+'-'+String(st+1).slice(2); };
 function nextInvoiceNumber(prefix, issue){
   const head=prefix+'/'+fyOfDate(issue)+'/';
   const used=S.invoices.map(i=>i.number).filter(n=>n.startsWith(head)).map(n=>Number(n.slice(head.length))).filter(Number.isFinite);
@@ -1028,8 +1084,8 @@ function invState(inv){
 }
 const INV_STATES = {draft:'Draft',unpaid:'Unpaid','part-paid':'Part paid',overdue:'Overdue',paid:'Paid',cancelled:'Cancelled'};
 const owing = x => x.due>0 && x.state!=='draft'; // sent and not fully paid
-function upiLink(inv,due){
-  const b=biz(); if(!b.upiId || !due) return null;
+function upiLink(inv,due){ // UPI only pays rupees
+  const b=biz(); if(!b.upiId || !due || inv.currency!=='INR') return null;
   const q={pa:b.upiId, pn:b.businessName||b.upiId, am:due.toFixed(2), cu:'INR', tn:inv.number};
   return 'upi://pay?'+Object.entries(q).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
 }
@@ -1046,11 +1102,11 @@ function qrSvg(text){
 function waNumber(contact){ const m=String(contact||'').match(/\+?\d[\d\s-]{8,}\d/); if(!m) return null; const d=m[0].replace(/\D/g,''); return d.length===10?'91'+d:d.length>=11&&d.length<=15?d:null; }
 // Reminders get firmer after 7 and 30 days overdue.
 function reminderText(inv){
-  const s=invState(inv), c=clientOf(inv.clientId)||{}, b=biz(), amt=rs(s.due), due=inv.dueDate?fmtDate(inv.dueDate):'';
+  const s=invState(inv), c=clientOf(inv.clientId)||{}, b=biz(), amt=ex(s.due,inv.currency), due=inv.dueDate?fmtDate(inv.dueDate):'';
   const body = s.days>30 ? 'Invoice '+inv.number+' for '+amt+' is now '+s.days+' days overdue. Please make the payment by '+fmtDate(addDays(today(),7))+', or reply with the date you will pay it.'
     : s.days>=7 ? 'Invoice '+inv.number+' for '+amt+' was due on '+due+' and is now '+s.days+' days overdue. Please arrange the payment this week.'
     : 'This is a friendly reminder that invoice '+inv.number+' for '+amt+(s.state==='overdue'?' was due on '+due:due?' is due on '+due:' is due')+'.';
-  const pay=[b.upiId?'You can pay by UPI to '+b.upiId+'.':'', b.bankDetails?'Bank transfer:\n'+b.bankDetails:''].filter(Boolean).join('\n');
+  const pay=[b.upiId&&inv.currency==='INR'?'You can pay by UPI to '+b.upiId+'.':'', b.bankDetails?'Bank transfer:\n'+b.bankDetails:''].filter(Boolean).join('\n');
   return ['Hi'+(c.name?' '+c.name:'')+',', body, pay, 'Thank you'+(b.businessName?',\n'+b.businessName:'')].filter(Boolean).join('\n\n');
 }
 
@@ -1059,22 +1115,25 @@ function invoiceRow(x){
   return h('a',{class:'row',href:hrefOf({name:'invoice',id:x.i.id})},
     h('div',{class:'grow'},h('div',{class:'title'},x.i.number+' · '+clientName(x.i.clientId)),
       h('div',{class:'sub'},[p?p.name:null,'Issued '+fmtDate(x.i.issueDate), x.state==='overdue'?x.days+(x.days===1?' day':' days')+' overdue':x.i.dueDate&&owing(x)?'Due '+fmtDate(x.i.dueDate):null].filter(Boolean).join(' · '))),
-    h('div',{class:'right'},h('span',{class:'num'},rs(owing(x)?x.due:x.i.total)),h('span',{class:'state '+x.state},INV_STATES[x.state])));
+    h('div',{class:'right'},h('span',{class:'num'},rs(owing(x)?x.due:x.i.total,x.i.currency)),h('span',{class:'state '+x.state},INV_STATES[x.state])));
 }
 // What each client owes on sent invoices, most overdue first. Used on the dashboard and the Invoices tab.
-function collectCard(){
+// With a currency (the dashboard) only that currency's invoices; without one, a row per client and currency, and a subtotal for each currency.
+function collectCard(cur){
   const by={};
-  S.invoices.map(i=>({i,...invState(i)})).filter(owing).forEach(x=>{ const o=by[x.i.clientId]=by[x.i.clientId]||{id:x.i.clientId,due:0,days:0,n:0}; o.due+=x.due; o.days=Math.max(o.days,x.days); o.n++; });
+  S.invoices.map(i=>({i,...invState(i)})).filter(owing).filter(x=>!cur||x.i.currency===cur).forEach(x=>{ const o=by[x.i.clientId+'|'+x.i.currency]=by[x.i.clientId+'|'+x.i.currency]||{id:x.i.clientId,cur:x.i.currency,due:0,days:0,n:0}; o.due+=x.due; o.days=Math.max(o.days,x.days); o.n++; });
   const list=Object.values(by).sort((a,b)=>b.days-a.days||b.due-a.due);
   if(!list.length) return null;
-  return h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'To collect on invoices'),h('span',{class:'num sub'},rs(list.reduce((a,o)=>a+o.due,0)))),
+  const totals=curOrder(list.map(o=>o.cur)).map(c=>rs(list.filter(o=>o.cur===c).reduce((a,o)=>a+o.due,0),c)).join(' + ');
+  return h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'To collect on invoices'),h('span',{class:'num sub'},totals)),
     h('div',{class:'list'},list.map(o=>h('a',{class:'row',href:hrefOf({name:'client',id:o.id})},
       h('div',{class:'grow'},h('div',{class:'title'},clientName(o.id)),h('div',{class:'sub'},o.n+(o.n===1?' invoice':' invoices')+(o.days?' · '+o.days+(o.days===1?' day':' days')+' overdue':' · not due yet'))),
-      h('span',{class:'num'+(o.days?' out':'')},rs(o.due))))));
+      h('span',{class:'num'+(o.days?' out':'')},rs(o.due,o.cur))))));
 }
+// Who to pay: a UPI ID for rupee users, bank details for everyone else.
 function setupNotice(){
-  const b=biz(); if(b.businessName && b.upiId) return null;
-  return h('div',{class:'notice no-print'},'Add your business name and UPI ID so invoices show who to pay. ',canWrite()?h('button',{class:'linkbtn',type:'button',onclick:openSettingsSheet},'Add your details'):null);
+  const b=biz(), inr=b.defaultCurrency==='INR'; if(b.businessName && (inr ? b.upiId : b.bankDetails)) return null;
+  return h('div',{class:'notice no-print'},'Add your business name and '+(inr?'UPI ID':'bank details')+' so invoices show who to pay. ',canWrite()?h('a',{class:'linkbtn',href:'#/settings'},'Add your details'):null);
 }
 
 function renderInvoices(v){
@@ -1083,7 +1142,7 @@ function renderInvoices(v){
   const keep=k=>x=>k==='all'||(k==='open'?owing(x):x.state===k);
   add(v,
     h('div',{class:'page-head'},h('h1',null,'Invoices'),canWrite()?h('div',{class:'actions'},
-      h('button',{class:'btn',type:'button',onclick:openSettingsSheet},'Your details'),
+      h('a',{class:'btn',href:'#/settings'},'Your details'),
       h('button',{class:'btn primary',type:'button',onclick:()=>openInvoiceSheet()},'+ New invoice')):null),
     setupNotice());
   if(!all.length){ v.appendChild(h('div',{class:'empty'},'No invoices yet. Create one here, or from a milestone on a project page.')); return; }
@@ -1104,7 +1163,7 @@ function reopenInvoice(inv,to){
   const set=async()=>{ await api.update('invoices',inv.id,patch); };
   if(!pays.length) return quietly(set);
   confirmSheet('Move '+inv.number+' back to '+(to==='sent'?'Sent':'Draft')+'?',
-    'Its payments ('+pays.map(t=>rs(t.amount)+' on '+fmtDate(t.date)).join(', ')+', '+rs(total)+' in all) will be deleted so it is owed again. To keep them, cancel and edit or delete a payment yourself.',
+    'Its payments ('+pays.map(t=>rs(t.amount,inv.currency)+' on '+fmtDate(t.date)).join(', ')+', '+rs(total,inv.currency)+' in all) will be deleted so it is owed again. To keep them, cancel and edit or delete a payment yourself.',
     'Delete payments and move back', async()=>{
       for(const t of pays) await api.del('txns',t.id);
       await set();
@@ -1118,11 +1177,12 @@ function invoiceBoard(all){
   const sorted=all.slice().sort((a,b)=>b.days-a.days||b.i.issueDate.localeCompare(a.i.issueDate)||b.i.number.localeCompare(a.i.number));
   return board(cols.map(([k,l])=>{
     const xs=sorted.filter(x=>col(x)===k);
-    return { key:k, label:l, sub:rs(xs.reduce((a,x)=>a+(k==='sent'?x.due:k==='cancelled'?0:x.i.total),0)), cards:xs.map(x=>({ id:x.i.id, name:x.i.number,
+    const amt=x=>k==='sent'?x.due:k==='cancelled'?0:x.i.total; // a subtotal per currency
+    return { key:k, label:l, sub:curOrder(xs.map(x=>x.i.currency)).map(c=>rs(xs.filter(x=>x.i.currency===c).reduce((a,x)=>a+amt(x),0),c)).join(' + ')||rs(0), cards:xs.map(x=>({ id:x.i.id, name:x.i.number,
       moves: k==='paid' ? ['draft','sent','cancelled'] : ['draft','sent','paid','cancelled'].filter(t=>t!==k && !(k==='cancelled'&&t==='paid')),
       body:[h('a',{class:'title num',href:hrefOf({name:'invoice',id:x.i.id})},x.i.number),
         h('div',{class:'sub'},clientName(x.i.clientId)+(projOf(x.i.projectId)?' · '+projOf(x.i.projectId).name:'')),
-        h('div',{class:'num'},rs(owing(x)?x.due:x.i.total)+(owing(x)&&x.paid?' due':''))],
+        h('div',{class:'num'},rs(owing(x)?x.due:x.i.total,x.i.currency)+(owing(x)&&x.paid?' due':''))],
       chip: x.state==='overdue' ? h('span',{class:'state overdue'},x.days+(x.days===1?' day':' days')+' overdue')
         : ['part-paid','unpaid'].includes(x.state) ? h('span',{class:'state '+x.state},INV_STATES[x.state]+(x.i.dueDate?' · due '+fmtDate(x.i.dueDate):''))
         : h('span',{class:'sub'},'Issued '+fmtDate(x.i.issueDate)) })) };
@@ -1136,10 +1196,10 @@ function invoiceBoard(all){
 
 function invoiceDoc(inv,s){
   const b=biz(), c=clientOf(inv.clientId)||{}, p=projOf(inv.projectId), link=upiLink(inv,s.due), qr=link?qrSvg(link):null;
-  const lines=inv.items.map(i=>h('tr',null,h('td',null,i.description),h('td',null,String(i.quantity)),h('td',{class:'num'},rs(i.rate)),h('td',{class:'num'},rs(i.quantity*i.rate))));
-  const foot=[h('tr',null,h('td',{colspan:'3'},'Total'),h('td',{class:'num'},rs(inv.total)))];
-  if(s.paid && s.state!=='cancelled') foot.push(h('tr',null,h('td',{colspan:'3'},'Paid'),h('td',{class:'num'},'−'+rs(s.paid))));
-  if(s.state!=='cancelled' && s.state!=='paid') foot.push(h('tr',{class:'due'},h('td',{colspan:'3'},'Amount due'),h('td',{class:'num'},rs(s.due))));
+  const lines=inv.items.map(i=>h('tr',null,h('td',null,i.description),h('td',null,String(i.quantity)),h('td',{class:'num'},ex(i.rate,inv.currency)),h('td',{class:'num'},ex(i.quantity*i.rate,inv.currency))));
+  const foot=[h('tr',null,h('td',{colspan:'3'},'Total'),h('td',{class:'num'},ex(inv.total,inv.currency)))];
+  if(s.paid && s.state!=='cancelled') foot.push(h('tr',null,h('td',{colspan:'3'},'Paid'),h('td',{class:'num'},'−'+ex(s.paid,inv.currency))));
+  if(s.state!=='cancelled' && s.state!=='paid') foot.push(h('tr',{class:'due'},h('td',{colspan:'3'},'Amount due'),h('td',{class:'num'},ex(s.due,inv.currency))));
   const payable = s.due>0 && (link || b.bankDetails);
   return h('article',{class:'invoice'},
     h('div',{class:'inv-head'},
@@ -1151,10 +1211,10 @@ function invoiceDoc(inv,s){
       h('div',null,h('div',{class:'l'},'Due'),inv.dueDate?fmtDate(inv.dueDate):'On receipt')),
     h('div',{class:'tblwrap'},h('table',{class:'inv-items'},h('thead',null,h('tr',null,h('th',null,'Description'),h('th',null,'Qty'),h('th',null,'Rate'),h('th',null,'Amount'))),h('tbody',null,lines),h('tfoot',null,foot))),
     payable ? h('div',{class:'inv-pay'},
-      qr ? h('div',{class:'qr'},qr,h('span',{class:'inv-muted'},'Scan to pay '+rs(s.due))) : null,
+      qr ? h('div',{class:'qr'},qr,h('span',{class:'inv-muted'},'Scan to pay '+ex(s.due,inv.currency))) : null,
       h('div',null,h('div',{class:'l'},'How to pay'),
-        b.upiId?h('div',null,'UPI: ',h('b',null,b.upiId)):null,
-        link?h('a',{class:'linkbtn no-print',href:link},'Pay '+rs(s.due)+' in a UPI app'):null,
+        b.upiId&&inv.currency==='INR'?h('div',null,'UPI: ',h('b',null,b.upiId)):null,
+        link?h('a',{class:'linkbtn no-print',href:link},'Pay '+ex(s.due,inv.currency)+' in a UPI app'):null,
         b.bankDetails?h('div',{class:'pre'},b.bankDetails):null)) : null,
     inv.notes?h('div',{class:'inv-notes pre'},inv.notes):null);
 }
@@ -1177,7 +1237,7 @@ function renderInvoice(v,id){
     setupNotice(),
     inv.reminderCount?h('div',{class:'notice no-print'},'Reminded '+inv.reminderCount+(inv.reminderCount===1?' time':' times')+', last on '+fmtDate(inv.lastReminded)+'.'):null,
     invoiceDoc(inv,s));
-  const card=h('div',{class:'card no-print'},h('div',{class:'card-head'},h('h2',null,'Payments'),h('span',{class:'sub'},rs(s.paid)+' of '+rs(inv.total))));
+  const card=h('div',{class:'card no-print'},h('div',{class:'card-head'},h('h2',null,'Payments'),h('span',{class:'sub'},rs(s.paid,inv.currency)+' of '+rs(inv.total,inv.currency))));
   card.appendChild(pays.length?h('div',{class:'list'},pays.map(t=>txRow(t,false))):h('div',{class:'empty'},s.state==='cancelled'?'This invoice is cancelled, so nothing is owed on it.':'No payments yet. Use Record payment when the client pays.'));
   if(canWrite()) card.appendChild(s.state==='cancelled'
     ? h('button',{class:'btn small',type:'button',onclick:act(()=>api.update('invoices',inv.id,{status:'draft'}))},'Reopen as a draft')
@@ -1193,6 +1253,10 @@ function openInvoiceSheet(pre={}){
     if(client.sel.value!==NEW) sortProjects(S.projects.filter(p=>p.clientId===client.sel.value)).forEach(p=>pSel.appendChild(h('option',{value:p.id},p.name)));
     const want=inv?inv.projectId:pre.projectId; pSel.value = want && [...pSel.options].some(o=>o.value===want) ? want : ''; };
   client.sel.addEventListener('change',fillProjects); fillProjects();
+  // An invoice is in its project's currency and never changes it; without a project, pick one.
+  const cur=currencySelect('i-cur', inv ? inv.currency : biz().defaultCurrency);
+  const lockCur=()=>{ const pr=pSel.value?projOf(pSel.value):null; return pr?pr.currency:null; };
+  const syncCur=()=>{ const l=lockCur(); if(editing){ cur.disabled=true; return; } if(l){ cur.value=l; cur.disabled=true; } else cur.disabled=false; sync(); };
   const issue=h('input',{id:'i-issue',type:'date',value:inv?inv.issueDate:today()});
   const due=h('input',{id:'i-due',type:'date',value:inv?(inv.dueDate||''):addDays(today(),b.paymentTermsDays)});
   const number=h('span',{class:'num'},inv?inv.number:nextInvoiceNumber(b.invoicePrefix,today()));
@@ -1200,21 +1264,23 @@ function openInvoiceSheet(pre={}){
   issue.addEventListener('input',()=>{ if(!issue.value) return; if(!dueTouched) due.value=addDays(issue.value,b.paymentTermsDays); if(!editing) number.textContent=nextInvoiceNumber(b.invoicePrefix,issue.value); });
   const box=h('div',{class:'items'}), total=h('div',{class:'total',role:'status'});
   let rows=[];
-  const sync=()=>{ total.textContent='Total '+rs(cents(rows.reduce((a,r)=>a+(Number(r.qty.value)||0)*(Number(r.rate.value)||0),0))); 
-    rows.forEach((r,i)=>{ r.desc.setAttribute('aria-label','Item '+(i+1)+' description'); r.qty.setAttribute('aria-label','Item '+(i+1)+' quantity'); r.rate.setAttribute('aria-label','Item '+(i+1)+' rate (₹)'); }); };
+  const sync=()=>{ total.textContent='Total '+ex(cents(rows.reduce((a,r)=>a+(Number(r.qty.value)||0)*(Number(r.rate.value)||0),0)),cur.value); 
+    rows.forEach((r,i)=>{ r.desc.setAttribute('aria-label','Item '+(i+1)+' description'); r.qty.setAttribute('aria-label','Item '+(i+1)+' quantity'); r.rate.setAttribute('aria-label','Item '+(i+1)+' rate ('+curSym(cur.value)+')'); r.rate.placeholder='Rate ('+curSym(cur.value)+')'; }); };
   const addItem=(it={})=>{
     const r={ desc:h('input',{placeholder:'What it’s for',value:it.description||''}),
       qty:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',value:it.quantity??1}),
-      rate:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Rate (₹)',value:it.rate||''}) };
+      rate:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Rate',value:it.rate||''}) };
     r.qty.addEventListener('input',sync); r.rate.addEventListener('input',sync);
     r.el=h('div',{class:'itemrow'},r.desc,h('div',{class:'itemnums'},r.qty,r.rate,h('button',{class:'btn small ghost',type:'button',onclick:()=>{ rows=rows.filter(x=>x!==r); r.el.remove(); sync(); }},'Remove')));
     rows.push(r); box.appendChild(r.el); return r;
   };
-  (inv?inv.items:pre.items||[{}]).forEach(addItem); sync();
+  (inv?inv.items:pre.items||[{}]).forEach(addItem);
+  cur.addEventListener('change',sync); pSel.addEventListener('change',syncCur); client.sel.addEventListener('change',syncCur); syncCur(); sync();
   const notes=h('textarea',{id:'i-notes',placeholder:'e.g. Thank you for your business'}); notes.value=inv?inv.notes:b.invoiceNotes;
   sheet(editing?'Edit '+inv.number:'New invoice',[
     h('p',{class:'muted',style:'margin:0'},'Invoice ',number,pre.milestoneName?' · for the '+pre.milestoneName+' milestone':''),
     h('div',{class:'two'},h('div',{class:'field'},h('label',{for:'i-client'},'Client'),client.sel,client.box),field('i-project','Project',pSel)),
+    field('i-cur','Currency',cur,editing?'An invoice keeps its currency':lockCur()?'Same as its project':null),
     h('div',{class:'two'},field('i-issue','Issue date',issue),field('i-due','Due date',due,'Your payment terms: '+b.paymentTermsDays+(b.paymentTermsDays===1?' day':' days'))),
     h('div',{class:'field'},h('span',{class:'hint',style:'font-weight:600;font-size:13px'},'Items'),box,h('button',{class:'linkbtn',type:'button',onclick:()=>{ addItem().desc.focus(); sync(); }},'+ Add item')),
     total,
@@ -1224,39 +1290,94 @@ function openInvoiceSheet(pre={}){
     for(let i=0;i<rows.length;i++){ const r=rows[i], d=r.desc.value.trim(), q=Number(r.qty.value), rate=Number(r.rate.value);
       if(!d) return fail('Item '+(i+1)+' needs a description.');
       if(!(q>0)) return fail('Item '+(i+1)+' needs a quantity above 0.');
-      if(!(rate>0)) return fail('Item '+(i+1)+' needs a rate above ₹0.');
+      if(!(rate>0)) return fail('Item '+(i+1)+' needs a rate above '+ex(0,cur.value)+'.');
       items.push({description:d, quantity:q, rate}); }
     if(!items.length) return fail('Add at least one item.');
     if(!issue.value) return fail('Pick the issue date.');
     if(due.value && due.value<issue.value) return fail('The due date can’t be before the issue date.');
+    const lock=lockCur();
+    if(editing && lock && lock!==inv.currency) return fail(projOf(pSel.value).name+' is in '+lock+', but this invoice is in '+inv.currency+'. An invoice has to be in the same currency as its project.');
     const cid=await client.resolve(); if(!cid) return false;
-    const row={client_id:cid, project_id:pSel.value||null, issue_date:issue.value, due_date:due.value||null, items, total:cents(items.reduce((a,i)=>a+i.quantity*i.rate,0)), notes:notes.value.trim()};
+    const row={client_id:cid, project_id:pSel.value||null, currency:cur.value, issue_date:issue.value, due_date:due.value||null, items, total:cents(items.reduce((a,i)=>a+i.quantity*i.rate,0)), notes:notes.value.trim()};
     if(editing) await api.update('invoices',inv.id,row);
     else { const id=await api.insert('invoices',{...row, milestone_id:pre.milestoneId||null, number:nextInvoiceNumber(b.invoicePrefix,issue.value), status:'draft'}); go({name:'invoice',id}); }
   }, editing?'Save changes':'Create invoice', {noFocus:!!pre.items});
 }
 
-function openSettingsSheet(){
-  const b=biz(), row=S.settings[0];
-  const inp=(id,v,a={})=>h('input',{id,value:v??'',...a}), area=(id,v,ph)=>{ const t=h('textarea',{id,placeholder:ph||''}); t.value=v||''; return t; };
-  const name=inp('s-name',b.businessName,{placeholder:'e.g. Mec Web Studio'}), address=area('s-address',b.address), phone=inp('s-phone',b.phone,{type:'tel'}), email=inp('s-email',b.email,{type:'email'}),
-    upi=inp('s-upi',b.upiId,{placeholder:'yourname@okhdfcbank',autocapitalize:'off',spellcheck:'false'}), bank=area('s-bank',b.bankDetails,'Account name\nAccount number\nIFSC and bank'),
-    prefix=inp('s-prefix',b.invoicePrefix,{autocapitalize:'characters'}), terms=inp('s-terms',b.paymentTermsDays,{type:'number',min:'0',max:'365',step:'1',inputmode:'numeric'}), notes=area('s-notes',b.invoiceNotes,'e.g. Thank you for your business');
-  sheet('Your business details',[
-    h('p',{class:'muted',style:'margin:0'},'Printed on your invoices.'),
+// ---------- settings ----------
+// One page for everything about the user's business and region (#/settings). Each section saves on its own,
+// so a mistake in one doesn't hold up the others.
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const daysIn = m => new Date(2001,m,0).getDate(); // days in month m (1 = January)
+const fyWords = m => m===1 ? 'Your financial year is the calendar year: 1 January to 31 December.'
+  : 'Your financial year runs from 1 '+MONTHS[m-1]+' to '+daysIn(m-1)+' '+MONTHS[m-2]+'.';
+const saveSettings = patch => S.settings[0] ? api.update('settings',S.settings[0].id,patch) : api.insert('settings',patch);
+// A card with its own Save button. onSave returns an error message, or the changes to save.
+function settingsCard(key,title,intro,body,onSave,label){
+  const err=h('div',{class:'err',role:'alert'}), btn=h('button',{class:'btn primary',type:'submit'},label);
+  const form=h('form',{class:'card settings-card','aria-label':title,'data-section':key,novalidate:true},
+    h('h2',null,title), intro?h('p',{class:'muted',style:'margin:0'},intro):null, body, err,
+    h('div',{class:'save-row'},btn,S.settingsSaved===key?h('span',{class:'hint saved',role:'status'},'Saved.'):null));
+  form.addEventListener('submit',e=>{
+    e.preventDefault(); err.textContent='';
+    const r=onSave(); if(typeof r==='string'){ err.textContent=r; return; }
+    S.settingsSaved=key; saveSettings(r); // the screen updates at once; the save goes on in the background
+  });
+  return form;
+}
+function renderSettings(v){
+  const b=biz(), inp=(id,val,a={})=>h('input',{id,value:val??'',...a}), area=(id,val,ph)=>{ const t=h('textarea',{id,placeholder:ph||''}); t.value=val||''; return t; };
+  add(v,
+    h('a',{class:'back',href:'#/'},'← Dashboard'),
+    h('div',{class:'page-head'},h('h1',null,'Settings')));
+  if(!canWrite()){ v.appendChild(h('div',{class:'empty'},'Sign in to change your settings.')); return; }
+
+  // 1. Business: printed at the top of invoices.
+  const name=inp('s-name',b.businessName,{placeholder:'e.g. Mec Web Studio'}), address=area('s-address',b.address,'Street, city, postcode'), phone=inp('s-phone',b.phone,{type:'tel'}), email=inp('s-email',b.email,{type:'email'});
+  const business=settingsCard('business','Business','Printed at the top of your invoices.',[
     field('s-name','Business name',name), field('s-address','Address',address),
-    h('div',{class:'two'},field('s-phone','Phone',phone),field('s-email','Email',email)),
-    field('s-upi','UPI ID',upi,'Clients scan a QR code on the invoice to pay this'), field('s-bank','Bank details',bank,'For clients who pay by bank transfer'),
-    h('div',{class:'two'},field('s-prefix','Invoice number prefix',prefix,'INV gives INV/2026-27/001'),field('s-terms','Payment terms (days)',terms,'Days until an invoice is due')),
+    h('div',{class:'two'},field('s-phone','Phone',phone),field('s-email','Email',email))
+  ], ()=>({business_name:name.value.trim(), address:address.value.trim(), phone:phone.value.trim(), email:email.value.trim()}), 'Save business details');
+
+  // 2. Invoices: numbering, terms, and how clients pay.
+  const inr=b.defaultCurrency==='INR';
+  const upi=inr?inp('s-upi',b.upiId,{placeholder:'yourname@okhdfcbank',autocapitalize:'off',spellcheck:'false'}):null, bank=area('s-bank',b.bankDetails,'Account name\nAccount number\nBank and branch / IBAN / sort code'),
+    prefix=inp('s-prefix',b.invoicePrefix,{autocapitalize:'characters'}), terms=inp('s-terms',b.paymentTermsDays,{type:'number',min:'0',max:'365',step:'1',inputmode:'numeric'}), notes=area('s-notes',b.invoiceNotes,'e.g. Thank you for your business');
+  const invoices=settingsCard('invoices','Invoices','How new invoices are numbered, when they fall due and how clients pay you.',[
+    h('div',{class:'two'},field('s-prefix','Invoice number prefix',prefix,'INV gives '+nextInvoiceNumber('INV',today())),field('s-terms','Payment terms (days)',terms,'Days until an invoice is due')),
+    upi ? field('s-upi','UPI ID',upi,'Clients scan a QR code on rupee invoices to pay this') : null,
+    field('s-bank','Bank or payment details',bank,'Shown on invoices for clients who pay by bank transfer'),
     field('s-notes','Notes on every new invoice',notes)
-  ], async ()=>{
-    const u=upi.value.trim(), pf=prefix.value.trim()||'INV', t=terms.value===''?7:Number(terms.value);
-    if(u && !/^[\w.\-]{2,256}@[a-z][a-z0-9.\-]{1,64}$/i.test(u)) return fail('The UPI ID doesn’t look right. It looks like name@bank, e.g. yourname@okhdfcbank.');
-    if(!/^[A-Za-z0-9-]{1,10}$/.test(pf)) return fail('The prefix can only have letters, numbers and dashes (up to 10), like INV.');
-    if(!Number.isInteger(t) || t<0 || t>365) return fail('Payment terms must be a whole number of days from 0 to 365.');
-    const r={business_name:name.value.trim(), address:address.value.trim(), phone:phone.value.trim(), email:email.value.trim(), upi_id:u, bank_details:bank.value.trim(), invoice_prefix:pf, payment_terms_days:t, invoice_notes:notes.value.trim()};
-    if(row) await api.update('settings',row.id,r); else await api.insert('settings',r);
-  }, 'Save details');
+  ], ()=>{
+    const pf=prefix.value.trim()||'INV', t=terms.value===''?7:Number(terms.value), u=upi?upi.value.trim():null;
+    if(u && !/^[\w.\-]{2,256}@[a-z][a-z0-9.\-]{1,64}$/i.test(u)) return 'The UPI ID doesn’t look right. It looks like name@bank, e.g. yourname@okhdfcbank.';
+    if(!/^[A-Za-z0-9-]{1,10}$/.test(pf)) return 'The prefix can only have letters, numbers and dashes (up to 10), like INV.';
+    if(!Number.isInteger(t) || t<0 || t>365) return 'Payment terms must be a whole number of days from 0 to 365.';
+    return {invoice_prefix:pf, payment_terms_days:t, ...(upi?{upi_id:u}:{}), bank_details:bank.value.trim(), invoice_notes:notes.value.trim()};
+  }, 'Save invoice settings');
+
+  // 3. Regional: currency, financial year, time zone, number and date style.
+  const cur=currencySelect('s-currency',b.defaultCurrency);
+  const fy=h('select',{id:'s-fy'},MONTHS.map((m,i)=>h('option',{value:String(i+1)},m))); fy.value=String(b.fyStartMonth);
+  const zones=(Intl.supportedValuesOf?Intl.supportedValuesOf('timeZone'):['Asia/Kolkata','Asia/Dubai','Asia/Singapore','Europe/London','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','Australia/Sydney','Pacific/Auckland']);
+  const tz=h('input',{id:'s-tz',list:'s-tz-list',value:b.timezone,autocapitalize:'off',spellcheck:'false',autocomplete:'off'});
+  const tzList=h('datalist',{id:'s-tz-list'},zones.map(z=>h('option',{value:z})));
+  const loc=h('select',{id:'s-locale'},LOCALES.map(([k,l])=>h('option',{value:k},l+' · '+new Intl.NumberFormat(k).format(1234567.89)))); loc.value=b.locale;
+  const fyNote=h('div',{class:'hint',id:'s-fy-note',role:'status'}), fyWarn=h('div',{class:'hint warn-note',id:'s-fy-warn'});
+  const syncFy=()=>{ const m=Number(fy.value); fyNote.textContent=fyWords(m)+' Dates are by month, so a tax year that starts part-way through a month (like 6 April) is shown from the 1st.';
+    fyWarn.textContent = m!==b.fyStartMonth ? 'New invoices will be numbered under the new year and start again at 001. Numbers you have already used don’t change.' : ''; };
+  fy.addEventListener('change',syncFy); syncFy();
+  const regional=settingsCard('regional','Region','Used for new projects, your financial year, what “today” is and how amounts and dates are written.',[
+    h('div',{class:'two'},field('s-currency','Default currency',cur,'For new projects, and money with no project. Each project keeps its own currency.'),field('s-fy','Financial year starts in',fy)),
+    fyNote, fyWarn,
+    h('div',{class:'two'},field('s-tz','Time zone',tz,'e.g. Asia/Kolkata, Europe/London, America/New_York'),field('s-locale','Number and date style',loc)), tzList
+  ], ()=>{
+    const z=tz.value.trim();
+    if(!z || validTz(z)!==z) return 'That time zone isn’t recognised. Use a name like Asia/Kolkata, Europe/London or America/New_York.';
+    return {default_currency:cur.value, fy_start_month:Number(fy.value), timezone:z, locale:loc.value};
+  }, 'Save region settings');
+
+  v.appendChild(h('div',{class:'settings-page'},business,invoices,regional));
 }
 
 // The message is written here and sent by you (copy it, or open WhatsApp). Nothing is sent from the app.
@@ -1269,7 +1390,7 @@ function openReminderSheet(inv){
   msg.addEventListener('input',syncWa); syncWa();
   const tone = s.days>30 ? 'Over a month late, so it asks for a payment date.' : s.days>=7 ? 'Over a week late, so it’s direct.' : 'A friendly nudge.';
   sheet('Remind '+(c.name||'the client'),[
-    h('p',{class:'muted',style:'margin:0'},[inv.number, rs(s.due)+' due', s.days?s.days+(s.days===1?' day':' days')+' overdue':null, inv.reminderCount?'reminded '+inv.reminderCount+(inv.reminderCount===1?' time':' times')+', last on '+fmtDate(inv.lastReminded):null].filter(Boolean).join(' · ')),
+    h('p',{class:'muted',style:'margin:0'},[inv.number, ex(s.due,inv.currency)+' due', s.days?s.days+(s.days===1?' day':' days')+' overdue':null, inv.reminderCount?'reminded '+inv.reminderCount+(inv.reminderCount===1?' time':' times')+', last on '+fmtDate(inv.lastReminded):null].filter(Boolean).join(' · ')),
     field('r-text','Message',msg,tone+' Edit it as you like.'),
     h('div',{class:'splits'},
       h('button',{class:'btn small',type:'button',onclick:async()=>{ try{ await navigator.clipboard.writeText(msg.value); status.textContent='Copied.'; }catch(e){ msg.select(); status.textContent='Press copy to copy the selected text.'; } }},'Copy reminder'),
@@ -1293,12 +1414,12 @@ function serviceWhen(x){
   const d=-daysSince(x.nextRenewal);
   return d<0 ? 'Was due '+fmtDate(x.nextRenewal)+' · '+(-d)+(d===-1?' day':' days')+' overdue' : d===0 ? 'Renews today' : 'Renews '+fmtDate(x.nextRenewal)+' · in '+d+(d===1?' day':' days');
 }
-function serviceRow(x, showClient){
+function serviceRow(x, showClient){ // each service in its own currency
   const overdue=x.active && x.nextRenewal<today();
   return h('div',{class:'svcrow'},
     h(canWrite()?'button':'div',{class:'grow',type:canWrite()?'button':null,'aria-label':canWrite()?'Edit '+x.name:null,onclick:canWrite()?()=>openServiceSheet({service:x}):null},
       h('div',{class:'title'},x.name),
-      h('div',{class:'sub'},[showClient?clientName(x.clientId):null, kindOf(x.kind)[1], rs(x.price)+' '+(CYCLES.find(c=>c[0]===x.cycle)||CYCLES[2])[1].toLowerCase()].filter(Boolean).join(' · ')),
+      h('div',{class:'sub'},[showClient?clientName(x.clientId):null, kindOf(x.kind)[1], rs(x.price,x.currency)+' '+(CYCLES.find(c=>c[0]===x.cycle)||CYCLES[2])[1].toLowerCase()].filter(Boolean).join(' · ')),
       h('div',{class:'sub'+(overdue?' out':'')},serviceWhen(x))),
     canWrite()&&x.active?h('button',{class:'btn small'+(overdue?' primary':''),type:'button',onclick:()=>openRenewSheet(x)},'Renew'):null);
 }
@@ -1312,15 +1433,17 @@ function renewalsCard(){
   return card;
 }
 function renderRenewals(v){
-  const act=S.services.filter(x=>x.active), rev=act.reduce((a,x)=>a+x.price*yearly(x),0), cost=act.reduce((a,x)=>a+x.cost*yearly(x),0);
-  const soon=addDays(today(),30), due=act.filter(x=>x.nextRenewal<=soon);
+  // Yearly figures are for one currency (the pills switch it when there are several); the list shows every service in its own.
+  const cur=dashCur(), act=S.services.filter(x=>x.active&&x.currency===cur), rev=act.reduce((a,x)=>a+x.price*yearly(x),0), cost=act.reduce((a,x)=>a+x.cost*yearly(x),0);
+  const soon=addDays(today(),30), due=S.services.filter(x=>x.active&&x.nextRenewal<=soon);
   add(v,
     h('a',{class:'back',href:'#/'},'← Dashboard'),
     h('div',{class:'page-head'},h('h1',null,'Renewals'),canWrite()?h('button',{class:'btn primary',type:'button',onclick:()=>openServiceSheet()},'+ Add service'):null),
+    curPills(cur)?h('div',{class:'filters'},curPills(cur)):null,
     h('div',{class:'kpis'},
-      kpi('Yearly revenue',rs(rev),act.length+(act.length===1?' active service':' active services'),'in'),
-      kpi('Yearly cost',rs(cost),'What you pay providers','out'),
-      kpi('Yearly profit',signed(rev-cost),rev>0?Math.round((rev-cost)/rev*100)+'% margin':'From renewals',rev-cost<0?'out':''),
+      kpi('Yearly revenue',rs(rev,cur),act.length+(act.length===1?' active service':' active services'),'in'),
+      kpi('Yearly cost',rs(cost,cur),'What you pay providers','out'),
+      kpi('Yearly profit',signed(rev-cost,cur),rev>0?Math.round((rev-cost)/rev*100)+'% margin':'From renewals',rev-cost<0?'out':''),
       kpi('Due in 30 days',String(due.length),due.filter(x=>x.nextRenewal<today()).length+' overdue')));
   if(!S.services.length){ v.appendChild(h('div',{class:'empty'},'No services yet. Add a client’s domain, hosting, SSL or care plan with what it costs you and what you charge, and Renew logs the cost, invoices the client and moves the date on.')); return; }
   const list=sortServices(S.services);
@@ -1338,6 +1461,11 @@ function openServiceSheet(pre={}){
   const kind=h('select',{id:'v-kind'},KINDS.map(([k,l])=>h('option',{value:k},l))); kind.value=x?x.kind:'domain';
   const name=h('input',{id:'v-name',placeholder:'e.g. bakery.in or Hostinger Business',value:x?x.name:''});
   const provider=h('input',{id:'v-provider',placeholder:'e.g. GoDaddy, Hostinger',value:x?x.provider:''});
+  // A renewal tied to a project is in the project's currency; otherwise pick one.
+  const cur=currencySelect('v-cur', x?x.currency:biz().defaultCurrency);
+  const lockCur=()=>{ const pr=pSel.value?projOf(pSel.value):null; return pr?pr.currency:null; };
+  const syncCur=()=>{ const l=lockCur(); if(l){ cur.value=l; cur.disabled=true; } else cur.disabled=false; };
+  pSel.addEventListener('change',syncCur); client.sel.addEventListener('change',syncCur); syncCur();
   const cost=h('input',{id:'v-cost',type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'0',value:x&&x.cost?x.cost:''});
   const price=h('input',{id:'v-price',type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'0',value:x&&x.price?x.price:''});
   const cycle=h('select',{id:'v-cycle'},CYCLES.map(([k,l])=>h('option',{value:k},l))); cycle.value=x?x.cycle:'yearly';
@@ -1349,7 +1477,8 @@ function openServiceSheet(pre={}){
     h('div',{class:'two'},h('div',{class:'field'},h('label',{for:'v-client'},'Client'),client.sel,client.box),field('v-project','Project',pSel)),
     h('div',{class:'two'},field('v-kind','Kind',kind),field('v-name','Name',name)),
     field('v-provider','Provider',provider),
-    h('div',{class:'two'},field('v-cost','It costs you (₹)',cost,'Each cycle'),field('v-price','You charge (₹)',price,'Each cycle')),
+    field('v-cur','Currency',cur,lockCur()?'Same as its project':null),
+    h('div',{class:'two'},field('v-cost','It costs you',cost,'Each cycle'),field('v-price','You charge',price,'Each cycle')),
     h('div',{class:'two'},field('v-cycle','Renews',cycle),field('v-next','Next renewal',next)),
     h('label',{class:'check'},auto,'Renews automatically with the provider'),
     editing?h('label',{class:'check'},active,'Still active (untick to stop tracking it)'):null,
@@ -1359,8 +1488,9 @@ function openServiceSheet(pre={}){
     if(!next.value) return fail('Pick the next renewal date.');
     const c=cost.value===''?0:Number(cost.value), pr=price.value===''?0:Number(price.value);
     if(!(c>=0) || !(pr>=0)) return fail('Amounts can’t be negative.');
+    if(editing && lockCur() && lockCur()!==x.currency) return fail(projOf(pSel.value).name+' is in '+lockCur()+', but this service is in '+x.currency+'. A renewal has to be in the same currency as its project.');
     const cid=await client.resolve(); if(!cid) return false;
-    const row={client_id:cid, project_id:pSel.value||null, kind:kind.value, name:n, provider:provider.value.trim(), cost:c, price:pr, cycle:cycle.value, next_renewal:next.value, auto_renew:auto.checked, active:editing?active.checked:true, notes:notes.value.trim()};
+    const row={client_id:cid, project_id:pSel.value||null, currency:cur.value, kind:kind.value, name:n, provider:provider.value.trim(), cost:c, price:pr, cycle:cycle.value, next_renewal:next.value, auto_renew:auto.checked, active:editing?active.checked:true, notes:notes.value.trim()};
     if(editing) await api.update('services',x.id,row); else await api.insert('services',row);
   }, editing?'Save changes':'Add service', editing?{onDelete:()=>confirmSheet('Delete '+x.name+'?','Its past expenses and invoices stay. To keep it on record instead, untick Still active.','Delete service',async()=>{ await api.del('services',x.id); }), deleteLabel:'Delete service'}:{});
 }
@@ -1377,14 +1507,14 @@ function openRenewSheet(x){
   sheet('Renew '+x.name,[
     h('p',{class:'muted',style:'margin:0'},client+' · '+kindOf(x.kind)[1]+' · '+period),
     h('ul',{class:'renew-steps'},
-      step(doExp, x.cost>0 ? 'Log '+rs(x.cost)+' spent on '+x.name+' ('+kindOf(x.kind)[2]+')' : 'No cost to log'),
-      step(doInv, x.price>0 ? 'Create draft invoice '+number+' to '+client+' for '+rs(x.price) : 'No price to invoice'),
+      step(doExp, x.cost>0 ? 'Log '+ex(x.cost,x.currency)+' spent on '+x.name+' ('+kindOf(x.kind)[2]+')' : 'No cost to log'),
+      step(doInv, x.price>0 ? 'Create draft invoice '+number+' to '+client+' for '+ex(x.price,x.currency) : 'No price to invoice'),
       h('li',null,h('label',null,h('input',{type:'checkbox',checked:true,disabled:true}),h('span',null,'Move the next renewal from '+fmtDate(x.nextRenewal)+' to '+fmtDate(next))))),
   ], async ()=>{
     let invId=null;
-    if(doInv.checked) invId=await api.insert('invoices',{client_id:x.clientId, project_id:x.projectId, milestone_id:null, number, issue_date:t, due_date:addDays(t,b.paymentTermsDays),
+    if(doInv.checked) invId=await api.insert('invoices',{client_id:x.clientId, project_id:x.projectId, currency:x.currency, milestone_id:null, number, issue_date:t, due_date:addDays(t,b.paymentTermsDays),
       items:[{description:x.name+' — '+x.kind+' renewal ('+period+')', quantity:1, rate:x.price}], total:x.price, status:'draft', notes:b.invoiceNotes});
-    if(doExp.checked) await api.insert('txns',{client_id:x.clientId, project_id:x.projectId, type:'out', amount:x.cost, category:kindOf(x.kind)[2], note:x.name+' renewal', date:t});
+    if(doExp.checked) await api.insert('txns',{client_id:x.clientId, project_id:x.projectId, currency:x.currency, type:'out', amount:x.cost, category:kindOf(x.kind)[2], note:x.name+' renewal', date:t});
     await api.update('services',x.id,{next_renewal:next});
     if(invId) go({name:'invoice',id:invId});
   }, 'Renew', {noFocus:true});
@@ -1427,18 +1557,19 @@ const OPTIONAL = ['milestones','invoices','settings','services','tasks','time_en
 // Columns added for the dashboard default to empty, so the app still loads before supabase/schema.sql is re-run.
 const map = {
   clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
-  projects: r => ({ id:r.id, clientId:r.client_id, name:r.name, status:r.status||'active', description:r.description||'', quoted:Number(r.quoted)||0,
+  projects: r => ({ id:r.id, clientId:r.client_id, currency:curOf(r.currency), name:r.name, status:r.status||'active', description:r.description||'', quoted:Number(r.quoted)||0,
     previewUrl:cleanUrl(r.preview_url)||'', liveUrl:cleanUrl(r.live_url)||'', githubUrl:cleanUrl(r.github_url)||'', startDate:r.start_date||null, dueDate:r.due_date||null, createdAt:ms(r.created_at) }),
-  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, invoiceId:r.invoice_id||null, createdAt:ms(r.created_at) }),
+  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, currency:curOf(r.currency), type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, invoiceId:r.invoice_id||null, createdAt:ms(r.created_at) }),
   milestones: r => ({ id:r.id, projectId:r.project_id, name:r.name||'', amount:Number(r.amount)||0, dueDate:r.due_date||null, order:r.sort_order??0, createdAt:ms(r.created_at) }),
   tasks: r => ({ id:r.id, projectId:r.project_id, title:r.title||'', done:!!r.done, dueDate:r.due_date||null, order:r.sort_order??0, doneAt:r.done_at||null, createdAt:ms(r.created_at) }),
   time_entries: r => ({ id:r.id, projectId:r.project_id, date:r.date||null, minutes:Number(r.minutes)||0, note:r.note||'', createdAt:ms(r.created_at) }),
-  invoices: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, milestoneId:r.milestone_id||null, number:r.number, issueDate:r.issue_date, dueDate:r.due_date||null,
+  invoices: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, currency:curOf(r.currency), milestoneId:r.milestone_id||null, number:r.number, issueDate:r.issue_date, dueDate:r.due_date||null,
     total:Number(r.total)||0, status:r.status||'draft', notes:r.notes||'', sentAt:r.sent_at||null, lastReminded:r.last_reminded||null, reminderCount:r.reminder_count||0, createdAt:ms(r.created_at),
     items:(Array.isArray(r.items)?r.items:[]).map(i=>({description:i.description||'', quantity:Number(i.quantity)||0, rate:Number(i.rate)||0})) }),
   settings: r => ({ id:r.id, businessName:r.business_name||'', address:r.address||'', phone:r.phone||'', email:r.email||'', upiId:r.upi_id||'', bankDetails:r.bank_details||'',
-    invoicePrefix:r.invoice_prefix||'INV', paymentTermsDays:r.payment_terms_days??7, invoiceNotes:r.invoice_notes||'' }),
-  services: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, kind:r.kind||'other', name:r.name||'', provider:r.provider||'', cost:Number(r.cost)||0, price:Number(r.price)||0,
+    invoicePrefix:r.invoice_prefix||'INV', paymentTermsDays:r.payment_terms_days??7, invoiceNotes:r.invoice_notes||'',
+    defaultCurrency:curOf(r.default_currency), fyStartMonth:r.fy_start_month>=1&&r.fy_start_month<=12?r.fy_start_month:4, timezone:validTz(r.timezone), locale:LOCALES.some(l=>l[0]===r.locale)?r.locale:'en-IN' }),
+  services: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, currency:curOf(r.currency), kind:r.kind||'other', name:r.name||'', provider:r.provider||'', cost:Number(r.cost)||0, price:Number(r.price)||0,
     cycle:r.cycle||'yearly', nextRenewal:r.next_renewal, autoRenew:!!r.auto_renew, active:r.active!==false, notes:r.notes||'', createdAt:ms(r.created_at) })
 };
 // What a failed save says. A missing table or column means schema.sql hasn't been run yet.

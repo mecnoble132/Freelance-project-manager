@@ -7,7 +7,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const { parse } = require('../helpers/schema');
 const { Store } = require('../helpers/store');
-const { seed, ids, OWNER } = require('../helpers/seed');
+const { seed, seedUsd, ids, OWNER } = require('../helpers/seed');
 
 function loadPlaywright() {
   try { return require('playwright'); } catch (e) {}
@@ -27,15 +27,21 @@ test.before(async () => { browser = await chromium.launch(); });
 test.after(async () => { if (browser) await browser.close(); });
 
 // Opens the site on a fresh page. Returns the page and the list of browser errors seen.
-async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30', missing = [] } = {}) {
-  const context = await browser.newContext({ viewport, colorScheme, timezoneId: 'Asia/Kolkata', locale: 'en-IN' });
+// timezone / locale are the browser's; `settings` changes the owner's settings row (what the app itself uses, so the two can differ);
+// `usd` adds a dollar client, project, payments, invoice and renewal; `empty` starts with no data; `prepare(store)` changes the data before the page loads.
+async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30', missing = [],
+  timezone = 'Asia/Kolkata', locale = 'en-IN', settings, usd = false, empty = false, prepare } = {}) {
+  const context = await browser.newContext({ viewport, colorScheme, timezoneId: timezone, locale });
   t.after(() => context.close());
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message + (process.env.STACK ? ' ' + e.stack : '')));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   await page.clock.setFixedTime(new Date(now));
-  const store = seed(new Store(parse()));
+  const store = empty ? new Store(parse()) : seed(new Store(parse()));
+  if (usd) seedUsd(store);
+  if (settings) { if (store.rows.settings.some(r => r.user_id === OWNER)) store.update('settings', r => r.user_id === OWNER, settings); else store.insert('settings', settings, OWNER); }
+  if (prepare) prepare(store);
   missing.forEach(table => delete store.rows[table]); // as if supabase/schema.sql hadn't been re-run yet
   await page.addInitScript(init => {
     window.__LEDGER_TEST__ = init;
@@ -505,27 +511,28 @@ test('your business details: added the first time, checked, and shown on invoice
   await page.waitForSelector('text=Add your business name and UPI ID so invoices show who to pay.');
   await page.goto(SITE + '#/invoice/' + ids.invDesign);
   assert.equal(await page.locator('.invoice .qr').count(), 0); // no UPI ID yet
-  await page.click('#view button:has-text("Add your details")');
-  await page.fill('#s-name', 'Mec Studio');
+  await page.click('#view a:has-text("Add your details")'); // goes to the Settings page
+  await heading(page).filter({ hasText: 'Settings' }).waitFor();
   await page.fill('#s-upi', 'not a upi');
-  await page.click('.sheet button:has-text("Save details")');
+  await page.fill('#s-terms', '15');
+  await page.click('button:has-text("Save invoice settings")');
   await page.waitForSelector('text=The UPI ID doesn’t look right.');
   await page.fill('#s-upi', 'mec@ybl');
-  await page.fill('#s-terms', '15');
-  await page.click('.sheet button:has-text("Save details")');
+  await page.click('button:has-text("Save invoice settings")');
   await page.waitForSelector('text=The database is missing new tables or fields.'); // the table doesn't exist in this test
 });
 
 test('business details save, and set the terms for new invoices', async t => {
   const page = await open(t, { hash: '#/invoices' });
-  await page.click('#view button:has-text("Your details")');
+  await page.click('#view a:has-text("Your details")');
   assert.equal(await page.inputValue('#s-upi'), 'mec@okhdfcbank');
   await page.fill('#s-terms', '15');
   await page.fill('#s-prefix', 'MEC');
-  await page.click('.sheet button:has-text("Save details")');
-  await page.waitForSelector('.sheet', { state: 'detached' });
+  await page.click('button:has-text("Save invoice settings")');
+  await page.locator('[data-section="invoices"] .saved').waitFor();
   const st = (await rows(page, 'settings')).find(r => r.user_id === OWNER);
   assert.deepEqual([st.payment_terms_days, st.invoice_prefix, st.business_name], [15, 'MEC', 'Mec Web Studio']);
+  await page.click('#tabs a:has-text("Invoices")');
   await page.click('#view button:has-text("+ New invoice")');
   assert.equal(await page.inputValue('#i-due'), '2026-11-07');
   assert.match(await page.locator('.sheet').textContent(), /Invoice MEC\/2026-27\/001/);
@@ -1011,7 +1018,7 @@ for (const colorScheme of ['light', 'dark']) {
     const ms = await page.locator('.sheet').boundingBox();
     assert.ok(ms.x >= 0 && ms.x + ms.width <= 375, 'the milestones sheet is wider than the phone');
     assert.ok(await page.locator('.sheet').evaluate(el => el.scrollWidth <= el.clientWidth), 'the milestones sheet scrolls sideways');
-    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoices', 'Your details'], ['#/invoice/' + ids.invDesign, 'Remind'], ['#/renewals', '+ Add service'], ['#/renewals', 'Renew'], ['#/project/' + ids.gbSite, '+ Add task'], ['#/project/' + ids.gbSite, 'Log time']]) {
+    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoice/' + ids.invDesign, 'Remind'], ['#/renewals', '+ Add service'], ['#/renewals', 'Renew'], ['#/project/' + ids.gbSite, '+ Add task'], ['#/project/' + ids.gbSite, 'Log time']]) {
       await page.keyboard.press('Escape');
       await page.goto(SITE + hash);
       await page.click('#view button:has-text("' + button + '")');
@@ -1045,4 +1052,257 @@ test('a paid invoice can go back to Sent: its payments are deleted after asking'
   assert.equal((await rows(page, 'txns')).filter(x => x.invoice_id === ids.invAdvance).length, 0);
   assert.equal((await invRow(page, 'INV/2026-27/001')).status, 'sent');
   await page.locator('#view .page-head .state.overdue').waitFor();
+});
+
+// ---------- currencies, financial year, time zone and the Settings page (tester launch plan, step 3) ----------
+const view = page => page.locator('#view');
+
+test('Settings is one click away from every screen, and not there when signed out', async t => {
+  const out = await open(t, { signedIn: false });
+  await out.waitForSelector('#l-email');
+  assert.equal(await out.locator('#settings-link').isHidden(), true);
+  const page = await open(t);
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  for (const hash of ['#/', '#/projects', '#/clients', '#/money', '#/invoices', '#/renewals', '#/project/' + ids.gbSite, '#/client/' + ids.geekboz, '#/invoice/' + ids.invDesign]) {
+    await page.goto(SITE + hash);
+    await page.locator('#settings-link').waitFor();
+    await page.click('#settings-link');
+    await heading(page).filter({ hasText: 'Settings' }).waitFor();
+    assert.equal(page.url(), SITE + '#/settings', 'from ' + hash);
+    assert.equal(await page.locator('#settings-link').getAttribute('aria-current'), 'page');
+    assert.equal(await page.locator('.sheet').count(), 0, 'Settings is a page, not a pop-up');
+  }
+  assert.deepEqual(await page.locator('.settings-card h2').allTextContents(), ['Business', 'Invoices', 'Region']);
+  assert.equal(await page.locator('#tabs a[aria-current]').count(), 0, 'Settings is not one of the section tabs');
+});
+
+test('each settings section saves on its own, and refuses bad input', async t => {
+  const page = await open(t, { hash: '#/settings' });
+  await page.locator('#s-name').waitFor();
+  assert.deepEqual(await page.evaluate(() => ['s-name', 's-prefix', 's-terms', 's-upi', 's-currency', 's-fy', 's-tz', 's-locale'].map(id => document.getElementById(id).value)),
+    ['Mec Web Studio', 'INV', '7', 'mec@okhdfcbank', 'INR', '4', 'Asia/Kolkata', 'en-IN']);
+  assert.match(await page.locator('#s-fy-note').textContent(), /from 1 April to 31 March/);
+  // a mistake in one section doesn't stop another saving
+  const err = key => page.locator('[data-section="' + key + '"] .err');
+  await page.fill('#s-upi', 'nope');
+  await page.click('button:has-text("Save invoice settings")');
+  assert.match(await err('invoices').textContent(), /UPI ID doesn’t look right/);
+  await page.fill('#s-upi', 'mec@okhdfcbank'); await page.fill('#s-prefix', 'INV/2');
+  await page.click('button:has-text("Save invoice settings")');
+  assert.match(await err('invoices').textContent(), /prefix can only have letters/);
+  await page.fill('#s-prefix', 'INV'); await page.fill('#s-terms', '2.5');
+  await page.click('button:has-text("Save invoice settings")');
+  assert.match(await err('invoices').textContent(), /whole number of days/);
+  await page.fill('#s-name', 'New Studio'); await page.fill('#s-phone', '12345');
+  await page.click('button:has-text("Save business details")');
+  await page.locator('[data-section="business"] .saved').waitFor();
+  let st = (await rows(page, 'settings')).find(r => r.user_id === OWNER);
+  assert.deepEqual([st.business_name, st.phone, st.payment_terms_days, st.invoice_prefix], ['New Studio', '12345', 7, 'INV']); // only the business fields changed
+  assert.equal(await page.inputValue('#s-name'), 'New Studio');
+  // region: refuse a time zone that doesn't exist; warn that invoice numbers restart when the month changes
+  await page.fill('#s-tz', 'Mars/Olympus');
+  await page.click('button:has-text("Save region settings")');
+  assert.match(await err('regional').textContent(), /time zone isn’t recognised/);
+  assert.equal(await page.locator('#s-fy-warn').textContent(), '');
+  await page.selectOption('#s-fy', '1');
+  assert.match(await page.locator('#s-fy-note').textContent(), /calendar year: 1 January to 31 December/);
+  assert.match(await page.locator('#s-fy-warn').textContent(), /start again at 001/);
+  await page.selectOption('#s-fy', '7');
+  assert.match(await page.locator('#s-fy-note').textContent(), /from 1 July to 30 June/);
+  await page.selectOption('#s-fy', '1'); await page.selectOption('#s-currency', 'USD'); await page.selectOption('#s-locale', 'en-US'); await page.fill('#s-tz', 'America/New_York');
+  await page.click('button:has-text("Save region settings")');
+  await page.locator('[data-section="regional"] .saved').waitFor();
+  st = (await rows(page, 'settings')).find(r => r.user_id === OWNER);
+  assert.deepEqual([st.default_currency, st.fy_start_month, st.timezone, st.locale, st.business_name], ['USD', 1, 'America/New_York', 'en-US', 'New Studio']);
+  assert.equal(await page.locator('#s-upi').count(), 0, 'the UPI ID is only for a rupee default currency');
+  await page.goto(SITE + '#/');
+  assert.deepEqual((await page.locator('.pills button').allTextContents()).slice(0, 2), ['FY 2026', 'FY 2025']);
+});
+
+test('a new user can save settings before they have any', async t => {
+  const page = await open(t, { hash: '#/settings', missing: [], prepare: store => { store.rows.settings = []; } });
+  await page.locator('#s-currency').waitFor();
+  assert.equal(await page.inputValue('#s-currency'), 'INR'); // the defaults, until they choose
+  await page.selectOption('#s-currency', 'GBP'); await page.selectOption('#s-locale', 'en-GB'); await page.fill('#s-tz', 'Europe/London');
+  await page.click('button:has-text("Save region settings")');
+  await page.locator('[data-section="regional"] .saved').waitFor();
+  const mine = (await rows(page, 'settings')).filter(r => r.user_id === OWNER);
+  assert.equal(mine.length, 1);
+  assert.deepEqual([mine[0].default_currency, mine[0].fy_start_month, mine[0].timezone], ['GBP', 4, 'Europe/London']);
+});
+
+for (const colorScheme of ['light', 'dark']) {
+  test('the Settings page fits a phone screen (' + colorScheme + ')', async t => {
+    const page = await open(t, { hash: '#/settings', viewport: { width: 375, height: 800 }, colorScheme });
+    await page.locator('#s-name').waitFor();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the page scrolls sideways');
+    for (const card of await page.locator('.settings-card').all()) { const b = await card.boundingBox(); assert.ok(b.x >= 0 && b.x + b.width <= 375, 'a card is wider than the phone'); }
+    for (const id of ['s-name', 's-upi', 's-currency', 's-fy', 's-tz', 's-locale']) { const b = await page.locator('#' + id).boundingBox(); assert.ok(b.x >= 0 && b.x + b.width <= 375, id + ' is wider than the phone'); }
+    const { bg, fg } = await page.evaluate(() => ({ bg: getComputedStyle(document.body).backgroundColor, fg: getComputedStyle(document.querySelector('.settings-card h2')).color }));
+    assert.notEqual(bg, fg);
+    assert.equal(bg === 'rgb(15, 18, 24)', colorScheme === 'dark');
+  });
+}
+
+test('a new project picks its currency, which is locked once anything is attached to it', async t => {
+  const page = await open(t);
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  await page.click('#view button:has-text("+ New project")');
+  assert.equal(await page.inputValue('#p-cur'), 'INR'); // the default currency
+  await page.fill('#p-name', 'Shop'); await page.fill('#p-quoted', '500'); await page.selectOption('#p-cur', 'EUR');
+  await page.click('.sheet button:has-text("Add project")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.deepEqual((await rows(page, 'projects')).filter(r => r.name === 'Shop').map(r => [r.currency, r.quoted]), [['EUR', 500]]);
+  assert.equal(await kpi(page, 'Quoted').textContent(), '€500');
+  // nothing attached yet, so the currency can still change
+  await page.click('#view button:has-text("Edit")');
+  assert.equal(await page.locator('#p-cur').isDisabled(), false);
+  await page.selectOption('#p-cur', 'GBP');
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.equal(await kpi(page, 'Quoted').textContent(), '£500');
+  // a project with money, an invoice and milestones is fixed
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  await page.click('#view button:has-text("Edit")');
+  assert.equal(await page.locator('#p-cur').isDisabled(), true);
+  assert.equal(await page.inputValue('#p-cur'), 'INR');
+  assert.match(await page.locator('.sheet').textContent(), /Fixed: it already has payments, invoices, renewals or milestones in INR/);
+});
+
+test('money takes the currency of its project; with no project you pick one', async t => {
+  const page = await open(t, { usd: true });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  await page.click('#view button:has-text("+ Add money")');
+  assert.deepEqual([await page.inputValue('#m-cur'), await page.locator('#m-cur').isDisabled()], ['INR', true]); // GeekBoz → Website (rupees)
+  await page.selectOption('#m-client', ids.usdClient); // Brightwave → Brand site (dollars)
+  assert.deepEqual([await page.inputValue('#m-cur'), await page.locator('#m-cur').isDisabled()], ['USD', true]);
+  await page.fill('#m-amount', '250');
+  await page.click('.sheet button:has-text("Save")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  await page.click('#view button:has-text("+ Add money")');
+  await page.selectOption('#m-client', ids.usdClient); await page.selectOption('#m-project', '');
+  assert.equal(await page.locator('#m-cur').isDisabled(), false);
+  await page.selectOption('#m-cur', 'GBP'); await page.fill('#m-amount', '40');
+  await page.click('.sheet button:has-text("Save")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  const mine = await rows(page, 'txns');
+  assert.deepEqual(mine.filter(r => r.amount === 250 || r.amount === 40).map(r => [r.amount, r.currency, r.project_id]), [[250, 'USD', ids.usdProject], [40, 'GBP', null]]);
+  await page.goto(SITE + '#/money');
+  const text = await view(page).textContent();
+  assert.ok(text.includes('+$250') && text.includes('+£40') && text.includes('+₹20,000'), 'every entry in its own currency');
+  assert.match(await page.locator('#view .sub').first().textContent(), /₹.* in · .*\$.* in · .*£/s, 'one line of totals per currency');
+  // a rupee payment can't be moved into a dollar project
+  await page.locator('#view button.row', { hasText: 'Advance' }).filter({ hasText: '₹20,000' }).click();
+  await page.selectOption('#m-client', ids.usdClient);
+  assert.deepEqual([await page.inputValue('#m-cur'), await page.locator('#m-cur').isDisabled()], ['USD', true]);
+  await page.click('.sheet button:has-text("Save changes")');
+  assert.match(await page.locator('#sheet-err').textContent(), /That project is in USD; this payment is in INR/);
+  assert.equal((await rows(page, 'txns')).find(r => r.id === ids.advance).currency, 'INR');
+});
+
+test('the dashboard has a currency switcher only when there is money in more than one currency', async t => {
+  const single = await open(t);
+  await heading(single).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await single.locator('.cur-pills').count(), 0);
+  const page = await open(t, { usd: true, period: 'all' });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.deepEqual(await page.locator('.cur-pills button').allTextContents(), ['INR', 'USD']);
+  assert.equal(await page.locator('.cur-pills button[aria-pressed="true"]').textContent(), 'INR');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹40,000'); // not 41,000: currencies are never added
+  await page.click('.cur-pills button:has-text("USD")');
+  assert.deepEqual(await Promise.all(['Revenue', 'Spending', 'Profit', 'Still to collect'].map(l => kpi(page, l).textContent())), ['$1,000', '$120', '$880', '$2,000']);
+  assert.equal(await page.evaluate(() => localStorage.getItem('ledger.currency')), 'USD');
+  const text = await page.locator('#view').textContent();
+  assert.ok(text.includes('Brand site') && !text.includes('Edustudy Website') && !text.includes('₹'), 'only dollars on the dollar dashboard: ' + text.match(/.{20}₹.{20}/));
+  await page.goto(SITE + '#/renewals');
+  assert.equal(await page.locator('.cur-pills button[aria-pressed="true"]').textContent(), 'USD', 'the choice is remembered');
+  assert.deepEqual(await Promise.all(['Yearly revenue', 'Yearly cost', 'Yearly profit'].map(l => kpi(page, l).textContent())), ['$20', '$12', '$8']);
+  assert.ok((await page.locator('#view .svcrow').allTextContents()).some(x => x.includes('brightwave.com') && x.includes('$20 yearly')) && (await page.locator('#view .svcrow').allTextContents()).some(x => x.includes('₹1,500 yearly')), 'the list shows every service in its own currency');
+  await page.click('.cur-pills button:has-text("INR")');
+  assert.deepEqual(await Promise.all(['Yearly revenue', 'Yearly cost'].map(l => kpi(page, l).textContent())), ['₹31,500', '₹3,800']);
+  // clients and invoices keep each currency separate too
+  await page.goto(SITE + '#/clients');
+  const rowsText = await page.locator('#view .row').allTextContents();
+  assert.ok(rowsText.some(x => x.includes('Brightwave') && x.includes('$1,000 in') && x.includes('$880')) && rowsText.some(x => x.includes('GeekBoz') && x.includes('₹20,000 in')));
+  await page.goto(SITE + '#/client/' + ids.usdClient);
+  assert.equal(await kpi(page, 'Revenue').textContent(), '$1,000');
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '$2,000');
+});
+
+test('amounts follow the currency and the locale: rupees, dollars and yen', async t => {
+  const page = await open(t, { usd: true, period: 'all', settings: { default_currency: 'USD', locale: 'en-US' }, prepare: store => {
+    store.insert('projects', { id: 'bbbbbbbb-0000-4000-8000-0000000000f1', client_id: ids.geekboz, name: 'Tokyo', quoted: 3000000, currency: 'JPY' }, OWNER);
+    store.insert('txns', { client_id: ids.geekboz, project_id: 'bbbbbbbb-0000-4000-8000-0000000000f1', type: 'in', amount: 1234567, currency: 'JPY', date: '2026-10-01' }, OWNER);
+  } });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.deepEqual(await page.locator('.cur-pills button').allTextContents(), ['USD', 'INR', 'JPY']); // the default currency first
+  assert.equal(await kpi(page, 'Revenue').textContent(), '$1,000');
+  await page.click('.cur-pills button:has-text("JPY")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '¥1,234,567');
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '¥1,765,433');
+  await page.click('.cur-pills button:has-text("INR")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹40,000');
+  await page.goto(SITE + '#/projects');
+  const cards = await page.locator('.pcard').allTextContents();
+  assert.ok(cards.some(c => c.includes('Tokyo') && c.includes('¥1,234,567 of ¥3,000,000 paid')) && cards.some(c => c.includes('Brand site') && c.includes('$1,000 of $3,000 paid')));
+});
+
+test('a January financial year and a New York time zone: periods, "today" and invoice numbers', async t => {
+  // 22:00 on 23 October in New York, already the 24th in the browser's India time zone: the setting wins.
+  const page = await open(t, { usd: true, now: '2026-10-24T02:00:00Z', settings: { default_currency: 'USD', fy_start_month: 1, timezone: 'America/New_York', locale: 'en-US' } });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.deepEqual(await page.locator('.pills:not(.cur-pills) button').allTextContents(), ['FY 2026', 'FY 2025', 'This month', 'Last 12 months', 'This year', 'All time']);
+  assert.equal(await page.locator('.pills button:has-text("FY 2026")').getAttribute('title'), 'This financial year');
+  assert.deepEqual(await Promise.all(['Revenue', 'Spending'].map(l => kpi(page, l).textContent())), ['$1,000', '$120']);
+  assert.equal(await page.locator('details.tbl tbody tr').count(), 10); // January to October, as months
+  await page.click('.pills button:has-text("This month")');
+  assert.equal(await page.locator('details.tbl tbody tr').count(), 23, 'the 23rd is the last day: not the 24th');
+  await page.click('.pills button:has-text("FY 2025")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '$0');
+  await page.click('.cur-pills button:has-text("INR")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹0');
+  await page.click('.pills button:has-text("FY 2026")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹35,000'); // March's payment is in the calendar year
+  // new things start from the user's today
+  await page.goto(SITE + '#/projects');
+  await page.click('#view button:has-text("+ New project")');
+  assert.equal(await page.inputValue('#p-start'), '2026-10-23');
+  await page.keyboard.press('Escape');
+  await page.goto(SITE + '#/invoices');
+  await page.click('#view button:has-text("+ New invoice")');
+  assert.equal(await page.inputValue('#i-issue'), '2026-10-23');
+  assert.equal(await page.inputValue('#i-due'), '2026-10-30');
+  assert.equal(await page.inputValue('#i-cur'), 'USD'); // the default currency; no project yet
+  assert.match(await page.locator('.sheet').textContent(), /Invoice INV\/2026\/001/);
+  await page.selectOption('#i-client', ids.usdClient); await page.selectOption('#i-project', ids.usdProject);
+  assert.deepEqual([await page.inputValue('#i-cur'), await page.locator('#i-cur').isDisabled()], ['USD', true]);
+  await page.locator('.items input[placeholder="What it’s for"]').fill('Pages');
+  await page.locator('.items input[type=number]').nth(0).fill('2'); await page.locator('.items input[type=number]').nth(1).fill('450.5');
+  assert.equal(await page.locator('.sheet .total').textContent(), 'Total $901');
+  await page.click('.sheet button:has-text("Create invoice")');
+  await page.locator('.invoice').waitFor();
+  const inv = (await rows(page, 'invoices')).find(r => r.number === 'INV/2026/001');
+  assert.deepEqual([inv.currency, inv.total, inv.issue_date, inv.due_date, inv.project_id], ['USD', 901, '2026-10-23', '2026-10-30', ids.usdProject]);
+  // a dollar invoice shows exact amounts, and no UPI QR code or link
+  const doc = await page.locator('.invoice').textContent();
+  assert.ok(doc.includes('$450.50') && doc.includes('$901') && !doc.includes('₹') && !/UPI/.test(doc), doc);
+  assert.equal(await page.locator('.invoice .qr').count(), 0);
+  assert.match(doc, /Mec Web Studio/);
+  assert.match(doc, /A\/c 1234567890/); // bank details instead
+  // while a rupee invoice in the same account still has its QR code
+  await page.goto(SITE + '#/invoice/' + ids.invDesign);
+  await page.locator('.invoice .qr svg').waitFor();
+  assert.ok((await page.locator('.invoice').textContent()).includes('₹15,000'));
+});
+
+test('a reminder for a dollar invoice is in dollars and doesn\'t mention UPI', async t => {
+  const page = await open(t, { usd: true, prepare: store => { store.update('invoices', r => r.id === ids.usdInvoice, { due_date: '2026-10-10' }); store.update('txns', r => r.id === ids.usdAdvance, { invoice_id: null }); } });
+  await page.goto(SITE + '#/invoice/' + ids.usdInvoice);
+  await page.click('#view button:has-text("Remind")');
+  const msg = await page.inputValue('#r-text');
+  assert.match(msg, /Invoice INV\/2026-27\/004 for \$1,000 was due on/);
+  assert.doesNotMatch(msg, /UPI|₹/);
+  assert.match(msg, /Bank transfer:/);
+  const rem = await page.goto(SITE + '#/invoice/' + ids.invDesign).then(() => page.click('#view button:has-text("Remind")')).then(() => page.inputValue('#r-text'));
+  assert.match(rem, /₹15,000/); assert.match(rem, /UPI to mec@okhdfcbank/);
 });
