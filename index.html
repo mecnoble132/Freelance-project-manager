@@ -209,6 +209,22 @@ textarea{resize:vertical;min-height:90px}
 .stamp{display:inline-block;margin-top:6px;border:2px solid currentColor;border-radius:6px;padding:2px 10px;font-weight:700;text-transform:uppercase;font-size:13px}
 .stamp.paid{color:var(--in)} .stamp.cancelled{color:var(--out)}
 @media (max-width:560px){.inv-meta{grid-template-columns:1fr 1fr}.inv-meta>div:first-child{grid-column:1/-1}.invoice{padding:18px}.inv-title{text-align:left}}
+/* Boards: columns side by side, scrolling sideways inside the board (never the page) on small screens. */
+.board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(230px,1fr);gap:12px;overflow-x:auto;padding-bottom:6px;scroll-snap-type:x proximity}
+@media (max-width:640px){.board{grid-auto-columns:84%}}
+.bcol{background:var(--panel);border-radius:14px;box-shadow:var(--shadow);padding:10px;display:flex;flex-direction:column;gap:8px;min-height:140px;min-width:0;scroll-snap-align:start}
+.bcol.over{outline:2px dashed var(--accent);outline-offset:-2px}
+.bhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:2px 4px}
+.bhead h2{font-size:15px}
+.bcard{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0;cursor:grab}
+.bcard.dragging{opacity:.45}
+.bcard .title{font-weight:600;color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bcard .title:hover{color:var(--accent)}
+.bfoot{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap}
+.bcard select{font-size:12px;padding:4px 8px;width:auto;border-radius:8px}
+.bcard .state:not(.overdue){background:var(--panel)}
+.bempty{color:var(--muted);font-size:13px;text-align:center;padding:18px 6px;border:1px dashed var(--line);border-radius:10px}
+.view-pills button{padding:6px 12px}
 /* Print (Save as PDF): just the invoice, in black on white, on one A4 page. */
 @media print{
   @page{size:A4;margin:12mm}
@@ -238,7 +254,7 @@ textarea{resize:vertical;min-height:90px}
 <script>
 (function(){
 const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
-  period:pref('period','this_fy'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
+  period:pref('period','this_fy'), pView:pref('projectView','list'), iView:pref('invoiceView','list'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
 function pref(k,d){ try{ return localStorage.getItem('ledger.'+k) || d; }catch(e){ return d; } }
@@ -474,6 +490,34 @@ const icon = k => svg('svg',{viewBox:'0 0 24 24',fill:'none',stroke:'currentColo
 const LINKS = [['previewUrl','Preview','eye','preview'],['liveUrl','Live site','globe','live site'],['githubUrl','GitHub','git','GitHub']];
 function linkEl(url,label,ic,stop){ return h('a',{class:'link',href:url,target:'_blank',rel:'noopener noreferrer',title:url,onclick:stop?e=>e.stopPropagation():null},icon(ic),label); }
 
+// A board: one column per stage. Drag a card to another column, or use its Move to menu (which also works on
+// phones and with a keyboard). cols: [{key, label, sub, cards:[{id, el, moves}]}]; moves lists the columns a card may go to.
+function board(cols, onMove, name){
+  let dragging=null;
+  const moves=id=>{ for(const c of cols){ const k=c.cards.find(x=>x.id===id); if(k) return k.moves; } return []; };
+  return h('div',{class:'board','aria-label':name},cols.map(c=>{
+    const col=h('section',{class:'bcol','data-col':c.key,'aria-label':c.label},
+      h('div',{class:'bhead'},h('h2',null,c.label),h('span',{class:'sub num'},c.sub)),
+      c.cards.length ? c.cards.map(k=>{
+        const sel=h('select',{'aria-label':'Move '+k.name+' to',onchange:e=>{ const to=e.target.value; e.target.value=''; if(to) onMove(k.id,to); }},
+          h('option',{value:''},'Move to…'), cols.filter(x=>k.moves.includes(x.key)).map(x=>h('option',{value:x.key},x.label)));
+        const el=h('div',{class:'bcard',draggable:'true','data-id':k.id,
+          ondragstart:e=>{ dragging=k.id; e.dataTransfer.setData('text/plain',k.id); e.dataTransfer.effectAllowed='move'; el.classList.add('dragging'); },
+          ondragend:()=>{ dragging=null; el.classList.remove('dragging'); }},
+          k.body, h('div',{class:'bfoot'},k.chip,k.moves.length?sel:null));
+        return el;
+      }) : h('div',{class:'bempty'},'Nothing here. Drag a card in.'));
+    col.addEventListener('dragover',e=>{ if(dragging && moves(dragging).includes(c.key)){ e.preventDefault(); col.classList.add('over'); } });
+    col.addEventListener('dragleave',e=>{ if(!col.contains(e.relatedTarget)) col.classList.remove('over'); });
+    col.addEventListener('drop',e=>{ e.preventDefault(); col.classList.remove('over'); const id=dragging||e.dataTransfer.getData('text/plain'); dragging=null; if(id && moves(id).includes(c.key)) onMove(id,c.key); });
+    return col;
+  }));
+}
+const viewPills = (key,pk) => h('div',{class:'pills view-pills',role:'group','aria-label':'View'},[['list','List'],['board','Board']].map(([k,l])=>
+  h('button',{type:'button','aria-pressed':String(S[key]===k),onclick:()=>{ S[key]=k; setPref(pk,k); render(); }},l)));
+// Saves a change made from a board; the board redraws when the data reloads.
+const quietly = fn => fn().catch(e=>console.warn(e));
+
 function projectCard(p){
   const s=projStats(p), pct = s.quoted ? Math.min(100,s.earned/s.quoted*100) : 0;
   const links = LINKS.filter(([k])=>p[k]).map(([k,l,ic])=>linkEl(p[k],l,ic,true));
@@ -494,12 +538,13 @@ function projectCard(p){
 function renderProjects(v){
   const filters=[['open','Open'],['all','All'],...STATUSES];
   const count = k => S.projects.filter(p=>k==='all'||(k==='open'?p.status!=='done':p.status===k)).length;
-  const grid=h('div',{class:'pgrid'});
+  const isBoard = S.pView==='board';
+  const grid=h('div',{class:isBoard?'':'pgrid'});
+  const matches = p => { const q=S.pQuery.trim().toLowerCase(); return !q || (p.name+' '+clientName(p.clientId)+' '+p.description).toLowerCase().includes(q); };
   const fill=()=>{
     grid.textContent='';
-    const q=S.pQuery.trim().toLowerCase();
-    const list=sortProjects(S.projects).filter(p=>(S.pStatus==='all'||(S.pStatus==='open'?p.status!=='done':p.status===S.pStatus))
-      && (!q || (p.name+' '+clientName(p.clientId)+' '+p.description).toLowerCase().includes(q)));
+    if(isBoard){ grid.appendChild(projectBoard(sortProjects(S.projects).filter(matches))); return; }
+    const list=sortProjects(S.projects).filter(p=>(S.pStatus==='all'||(S.pStatus==='open'?p.status!=='done':p.status===S.pStatus)) && matches(p));
     if(!list.length) grid.appendChild(h('div',{class:'empty',style:'grid-column:1/-1'}, S.projects.length?'No projects match.':'No projects yet. Add your first one — title, client, links and price.'));
     list.forEach(p=>grid.appendChild(projectCard(p)));
   };
@@ -507,10 +552,23 @@ function renderProjects(v){
   add(v,
     h('div',{class:'page-head'},h('h1',null,'Projects'),canWrite()?h('button',{class:'btn primary',onclick:()=>openProjectSheet()},'+ New project'):null),
     h('div',{class:'filters'},
-      h('div',{class:'pills',role:'group','aria-label':'Status'},filters.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.pStatus===k),onclick:()=>{S.pStatus=k;render();}},l+' '+count(k)))),
+      viewPills('pView','projectView'),
+      isBoard ? null : h('div',{class:'pills',role:'group','aria-label':'Status'},filters.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.pStatus===k),onclick:()=>{S.pStatus=k;render();}},l+' '+count(k)))),
       search),
     grid);
   fill();
+}
+// One column per status; moving a card changes the project's status.
+function projectBoard(list){
+  return board(STATUSES.map(([k,l])=>{
+    const ps=list.filter(p=>p.status===k);
+    return { key:k, label:l, sub:String(ps.length), cards:ps.map(p=>{ const s=projStats(p);
+      return { id:p.id, name:p.name, moves:STATUSES.map(x=>x[0]).filter(x=>x!==k),
+        body:[h('a',{class:'title',href:hrefOf({name:'project',id:p.id})},p.name),
+          h('div',{class:'sub'},clientName(p.clientId)+(s.quoted?' · '+rs(s.earned)+' of '+rs(s.quoted)+' paid':'')),
+          s.overdue?h('div',{class:'overdue-note'},rs(s.overdue)+' overdue'):null],
+        chip: p.dueDate&&p.status!=='done' ? h('span',{class:'sub'},'Due '+fmtDate(p.dueDate)) : h('span') }; }) };
+  }), (id,to)=>quietly(()=>api.update('projects',id,{status:to})), 'Projects by status');
 }
 
 function renderProject(v,id){
@@ -923,10 +981,36 @@ function renderInvoices(v){
       h('button',{class:'btn primary',type:'button',onclick:()=>openInvoiceSheet()},'+ New invoice')):null),
     setupNotice());
   if(!all.length){ v.appendChild(h('div',{class:'empty'},'No invoices yet. Create one here, or from a milestone on a project page.')); return; }
+  const isBoard = S.iView==='board';
   add(v, collectCard(),
-    h('div',{class:'filters'},h('div',{class:'pills',role:'group','aria-label':'Invoices'},filters.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.iFilter===k),onclick:()=>{S.iFilter=k;render();}},l+' '+all.filter(keep(k)).length)))));
+    h('div',{class:'filters'},viewPills('iView','invoiceView'),
+      isBoard ? null : h('div',{class:'pills',role:'group','aria-label':'Invoices'},filters.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.iFilter===k),onclick:()=>{S.iFilter=k;render();}},l+' '+all.filter(keep(k)).length)))));
+  if(isBoard){ v.appendChild(invoiceBoard(all)); return; }
   const list=all.filter(keep(S.iFilter)).sort((a,b)=>b.i.issueDate.localeCompare(a.i.issueDate)||b.i.number.localeCompare(a.i.number));
   v.appendChild(list.length ? h('div',{class:'list'},list.map(invoiceRow)) : h('div',{class:'empty'},'No invoices here.'));
+}
+
+// Draft → Sent → Paid, or Cancelled. Overdue and part paid stay in Sent with their label. Paid comes from payments,
+// so moving a card to Paid opens Record payment; an invoice its payments already cover can't go back to Draft or Sent.
+function invoiceBoard(all){
+  const col = x => x.state==='cancelled'?'cancelled' : x.state==='paid'?'paid' : x.state==='draft'?'draft' : 'sent';
+  const cols=[['draft','Draft'],['sent','Sent'],['paid','Paid'],['cancelled','Cancelled']];
+  const sorted=all.slice().sort((a,b)=>b.days-a.days||b.i.issueDate.localeCompare(a.i.issueDate)||b.i.number.localeCompare(a.i.number));
+  return board(cols.map(([k,l])=>{
+    const xs=sorted.filter(x=>col(x)===k);
+    return { key:k, label:l, sub:rs(xs.reduce((a,x)=>a+(k==='sent'?x.due:k==='cancelled'?0:x.i.total),0)), cards:xs.map(x=>({ id:x.i.id, name:x.i.number,
+      moves: k==='paid' ? (x.paid>=x.i.total ? [] : ['draft','sent','cancelled']) : ['draft','sent','paid','cancelled'].filter(t=>t!==k && !(k==='cancelled'&&t==='paid')),
+      body:[h('a',{class:'title num',href:hrefOf({name:'invoice',id:x.i.id})},x.i.number),
+        h('div',{class:'sub'},clientName(x.i.clientId)+(projOf(x.i.projectId)?' · '+projOf(x.i.projectId).name:'')),
+        h('div',{class:'num'},rs(owing(x)?x.due:x.i.total)+(owing(x)&&x.paid?' due':''))],
+      chip: x.state==='overdue' ? h('span',{class:'state overdue'},x.days+(x.days===1?' day':' days')+' overdue')
+        : ['part-paid','unpaid'].includes(x.state) ? h('span',{class:'state '+x.state},INV_STATES[x.state]+(x.i.dueDate?' · due '+fmtDate(x.i.dueDate):''))
+        : h('span',{class:'sub'},'Issued '+fmtDate(x.i.issueDate)) })) };
+  }), (id,to)=>{
+    const inv=invOf(id), s=invState(inv);
+    if(to==='paid') return openMoneySheet({clientId:inv.clientId,projectId:inv.projectId,invoice:inv,amount:s.due||inv.total});
+    quietly(()=>api.update('invoices',id,to==='sent'?{status:'sent',sent_at:inv.sentAt||new Date().toISOString()}:{status:to}));
+  }, 'Invoices by stage');
 }
 
 function invoiceDoc(inv,s){
