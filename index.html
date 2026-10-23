@@ -233,6 +233,9 @@ textarea{resize:vertical;min-height:90px}
 .renew-steps{margin:0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}
 .renew-steps label{display:flex;gap:10px;align-items:flex-start;font-size:14px}
 .renew-steps input{width:auto;margin-top:3px}
+.task-check{width:20px;height:20px;flex:none;padding:0;accent-color:var(--accent)}
+.task-done{text-decoration:line-through;color:var(--muted)}
+.head-actions{display:flex;gap:10px;align-items:center}
 .check{display:flex;gap:8px;align-items:center;font-size:14px}
 .check input{width:auto}
 /* Print (Save as PDF): just the invoice, in black on white, on one A4 page. */
@@ -263,7 +266,7 @@ textarea{resize:vertical;min-height:90px}
 <script src="config.js"></script>
 <script>
 (function(){
-const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], services:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
+const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], services:[], tasks:[], time_entries:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
   period:pref('period','this_fy'), pView:pref('projectView','list'), iView:pref('invoiceView','list'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
@@ -436,7 +439,7 @@ function renderHome(v){
   if(!rec.length) recCard.appendChild(h('div',{class:'empty'},'Every payment and expense you log shows up here.'));
   else recCard.appendChild(h('div',{class:'list'},rec.map(t=>txRow(t,true))));
 
-  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(),renewalsCard(),owedCard,topCard,spendCard)));
+  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(),tasksDueCard(),renewalsCard(),owedCard,topCard,spendCard)));
   drawMoneyChart(chartBox, buckets);
 }
 const periodLabel = p => (PERIODS.find(x=>x[0]===p)||[])[1];
@@ -583,7 +586,7 @@ function projectBoard(list){
 
 function renderProject(v,id){
   const p=projOf(id); if(!p){ go({name:'projects'}); return; }
-  const s=projStats(p), tx=sortTx(S.txns.filter(t=>t.projectId===id)), c=clientOf(p.clientId);
+  const s=projStats(p), tx=sortTx(S.txns.filter(t=>t.projectId===id)), c=clientOf(p.clientId), time=projTime(p);
   add(v,
     h('a',{class:'back',href:'#/projects'},'← All projects'),
     h('div',{class:'page-head'},
@@ -598,7 +601,8 @@ function renderProject(v,id){
       kpi('Received', rs(s.earned), s.quoted?Math.round(Math.min(100,s.earned/s.quoted*100))+'% of quote':'Money in','in'),
       kpi('Spent', rs(s.spent), 'Money out','out'),
       kpi('Profit', signed(s.profit), s.earned>0?Math.round(s.profit/s.earned*100)+'% margin':'Received − spent', s.profit<0?'out':''),
-      kpi('Still to collect', rs(s.due), p.status==='lead'?'Lead — not owed yet':s.overdue?rs(s.overdue)+' overdue':'Quoted − received')));
+      kpi('Still to collect', rs(s.due), p.status==='lead'?'Lead — not owed yet':s.overdue?rs(s.overdue)+' overdue':'Quoted − received'),
+      time.minutes ? kpi('Earned per hour', rs(time.perHour), fmtMins(time.minutes)+' logged') : null));
   const links = h('div',{class:'links'},LINKS.map(([k,l,ic,lower])=>p[k]?linkEl(p[k],l+' · '+shortUrl(p[k]),ic):h('span',{class:'link none'},icon(ic),'No '+lower+' link')));
   const about = h('div',{class:'card'},h('h2',null,'About'),
     p.description?h('p',{class:'prose'},p.description):h('p',{class:'muted',style:'margin:0'},'No description yet.'+(canWrite()?' Use Edit to add one.':'')),
@@ -610,7 +614,7 @@ function renderProject(v,id){
   const money = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Money'),h('span',{class:'sub'},tx.length+(tx.length===1?' entry':' entries'))));
   if(!tx.length) money.appendChild(h('div',{class:'empty'},'No money logged for this project yet.'));
   else money.appendChild(h('div',{class:'list'},tx.map(t=>txRow(t,false))));
-  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},about,milestonesCard(p)),money));
+  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},about,tasksCard(p),milestonesCard(p)),h('div',{class:'stack'},money,timeCard(p))));
 }
 // The invoice for a milestone, or a button to create one for what's left of it.
 function milestoneInvoice(p,m){
@@ -630,6 +634,92 @@ function milestonesCard(p){
     h('div',{class:'right'},h('span',{class:'num'},rs(m.amount)),h('span',{class:'state '+m.state},MS_STATES[m.state]),milestoneInvoice(p,m))))));
   if(p.quoted && cents(total)!==cents(p.quoted)) card.appendChild(h('div',{class:'hint'},'The milestones add up to '+rs(total)+', but the quote is '+rs(p.quoted)+'.'));
   return card;
+}
+
+// ---------- tasks and time ----------
+const fmtMins = m => m>=60 ? Math.floor(m/60)+'h'+(m%60?' '+(m%60)+'m':'') : m+'m';
+// Open tasks first by due date, then the order they were added; done ones last, latest first. Same order as ledger.js.
+const projTasks = p => S.tasks.filter(t=>t.projectId===p.id).sort((a,b)=>(a.done-b.done)||(a.done?(b.doneAt||'').localeCompare(a.doneAt||''):(a.dueDate||'9999').localeCompare(b.dueDate||'9999')||a.order-b.order||a.createdAt-b.createdAt));
+// Hours logged, and money received per hour. Per hour only exists once time is logged. Same rules as ledger.js.
+function projTime(p){
+  const minutes=S.time_entries.filter(e=>e.projectId===p.id).reduce((a,e)=>a+e.minutes,0), got=sumOf(S.txns.filter(t=>t.projectId===p.id)).earned;
+  return {minutes, perHour: minutes>0 ? got/(minutes/60) : null};
+}
+// "1.5h", "1h 30m", "90m", "1:30", or just a number of hours. Returns whole minutes, or null when it isn't a time.
+function parseDuration(txt){
+  const t=String(txt||'').trim().toLowerCase(); let m;
+  if((m=/^(\d+):([0-5]\d)$/.exec(t))) return Number(m[1])*60+Number(m[2]);
+  if((m=/^(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hours?)?(?:\s*(\d+)\s*(?:m|min|mins|minutes?))?$/.exec(t))) return Math.round(Number(m[1])*60)+(m[2]?Number(m[2]):0);
+  if((m=/^(\d+)\s*(?:m|min|mins|minutes?)$/.exec(t))) return Number(m[1]);
+  return null;
+}
+const setTaskDone = (t,done) => api.update('tasks',t.id,{done, done_at: done ? new Date().toISOString() : null});
+function taskRow(p,t){
+  const late=!t.done && t.dueDate && t.dueDate<today();
+  return h('div',{class:'row'},
+    h('input',{type:'checkbox',class:'task-check','data-task':t.id,'aria-label':(t.done?'Reopen: ':'Mark done: ')+t.title,checked:t.done,disabled:!canWrite(),
+      onchange:e=>quietly(async()=>{ await setTaskDone(t,e.target.checked); const again=document.querySelector('[data-task="'+t.id+'"]'); if(again) again.focus(); })}), // the page redraws, so keep the keyboard on the same task
+    h('div',{class:'grow'},h('div',{class:'title'+(t.done?' task-done':'')},t.title),
+      t.dueDate&&!t.done?h('div',{class:late?'overdue-note':'sub'},(late?'Overdue · ':'Due ')+fmtDate(t.dueDate)):null),
+    canWrite()?h('button',{class:'linkbtn',type:'button','aria-label':'Edit task '+t.title,onclick:()=>openTaskSheet(p,t)},'Edit'):null);
+}
+function tasksCard(p){
+  const ts=projTasks(p), open=ts.filter(t=>!t.done).length;
+  const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Tasks'),
+    h('div',{class:'head-actions'},ts.length?h('span',{class:'sub'},open+' open · '+(ts.length-open)+' done'):null,
+      canWrite()?h('button',{class:'btn small',type:'button',onclick:()=>openTaskSheet(p)},'+ Add task'):null)));
+  card.appendChild(ts.length?h('div',{class:'list'},ts.map(t=>taskRow(p,t))):h('div',{class:'empty'},'A checklist for this project. Add what still needs doing, with a due date if it has one.'));
+  return card;
+}
+function timeCard(p){
+  const es=S.time_entries.filter(e=>e.projectId===p.id).sort((a,b)=>(b.date||'').localeCompare(a.date||'')||b.createdAt-a.createdAt), tm=projTime(p);
+  const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Time'),
+    h('div',{class:'head-actions'},tm.minutes?h('span',{class:'sub'},fmtMins(tm.minutes)+' · '+rs(tm.perHour)+' an hour'):null,
+      canWrite()?h('button',{class:'btn small',type:'button',onclick:()=>openTimeSheet(p)},'Log time'):null)));
+  if(!es.length){ card.appendChild(h('div',{class:'empty'},'Log the hours you spend to see what this project really earns per hour.')); return card; }
+  card.appendChild(h('div',{class:'list'},es.map(e=>{
+    const kids=[h('div',{class:'grow'},h('div',{class:'title'},e.note||'Time logged'),h('div',{class:'sub'},fmtDate(e.date))),h('span',{class:'num'},fmtMins(e.minutes))];
+    return canWrite()?h('button',{class:'row',type:'button','aria-label':'Edit '+fmtMins(e.minutes)+' on '+fmtDate(e.date),onclick:()=>openTimeSheet(p,e)},kids):h('div',{class:'row'},kids);
+  })));
+  return card;
+}
+// Open tasks that are overdue or due in the next 7 days, across every project (done projects' leftovers included).
+function tasksDueCard(){
+  if(!S.tasks.length) return null;
+  const soon=addDays(today(),7), due=S.tasks.filter(t=>!t.done && t.dueDate && t.dueDate<=soon && projOf(t.projectId)).sort((a,b)=>a.dueDate.localeCompare(b.dueDate)||a.order-b.order);
+  const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Tasks due soon'),due.length?h('span',{class:'sub num'},String(due.length)):null));
+  card.appendChild(due.length?h('div',{class:'list'},due.slice(0,8).map(t=>{ const late=t.dueDate<today();
+    return h('a',{class:'row',href:hrefOf({name:'project',id:t.projectId})},h('div',{class:'grow'},h('div',{class:'title'},t.title),h('div',{class:'sub'},projName(t.projectId)+' · '+clientName(projOf(t.projectId).clientId))),
+      h('span',{class:late?'overdue-note':'sub'},(late?'Overdue · ':'')+fmtDate(t.dueDate))); }))
+    :h('div',{class:'empty'},'Nothing due in the next 7 days.'));
+  return card;
+}
+function openTaskSheet(p,t){
+  const editing=!!t;
+  const title=h('input',{id:'t-title',value:t?t.title:'',maxlength:'300',placeholder:'e.g. Send the design for approval'});
+  const due=h('input',{id:'t-due',type:'date',value:t&&t.dueDate?t.dueDate:''});
+  sheet(editing?'Edit task':'Add a task',[field('t-title','Task',title),field('t-due','Due date (optional)',due)], async ()=>{
+    const name=title.value.trim(); if(!name) return fail('Type what needs doing.');
+    if(editing) await api.update('tasks',t.id,{title:name, due_date:due.value||null});
+    else await api.insert('tasks',{project_id:p.id, title:name, due_date:due.value||null, sort_order:S.tasks.filter(x=>x.projectId===p.id).length});
+  }, editing?'Save changes':'Add task', editing?{onDelete:()=>confirmSheet('Delete this task?',t.title,'Delete task',async()=>{ await api.del('tasks',t.id); }), deleteLabel:'Delete task'}:{});
+}
+function openTimeSheet(p,e){
+  const editing=!!e;
+  const spent=h('input',{id:'tm-spent',value:e?fmtMins(e.minutes):'',placeholder:'e.g. 1h 30m',autocomplete:'off'});
+  const date=h('input',{id:'tm-date',type:'date',value:e?(e.date||today()):today()});
+  const note=h('input',{id:'tm-note',value:e?e.note:'',maxlength:'500',placeholder:'e.g. Homepage design'});
+  sheet(editing?'Edit time':'Log time',[
+    h('div',{class:'two'},field('tm-spent','Time spent',spent,'1h 30m, 90m, 1.5h or 1:30; a plain number is hours'),field('tm-date','Day',date)),
+    field('tm-note','What was done (optional)',note)
+  ], async ()=>{
+    const m=parseDuration(spent.value);
+    if(m===null || m<=0) return fail('Type the time spent, like 1h 30m, 45m or 1.5h.');
+    if(m>1440) return fail('One entry can be at most 24 hours. Split longer work across days.');
+    if(!date.value) return fail('Pick the day the work was done.');
+    const row={project_id:p.id, date:date.value, minutes:m, note:note.value.trim()};
+    if(editing) await api.update('time_entries',e.id,row); else await api.insert('time_entries',row);
+  }, editing?'Save changes':'Log time', editing?{onDelete:()=>confirmSheet('Delete this time entry?',fmtMins(e.minutes)+' on '+fmtDate(e.date)+(e.note?' · '+e.note:''),'Delete time',async()=>{ await api.del('time_entries',e.id); }), deleteLabel:'Delete time'}:{});
 }
 
 // ---------- clients ----------
@@ -780,8 +870,8 @@ function openProjectSheet(pre={}){
     if(editing){ await api.update('projects',p.id,row); }
     else { const id=await api.insert('projects',row); go({name:'project',id}); }
   }, editing?'Save changes':'Add project', editing?{onDelete:()=>{
-    const n=S.txns.filter(t=>t.projectId===p.id).length, nm=S.milestones.filter(m=>m.projectId===p.id).length;
-    confirmSheet('Delete '+p.name+'?', (n ? 'Its '+n+(n===1?' money entry stays':' money entries stay')+' with '+clientName(p.clientId)+', under “No project”.' : 'This can’t be undone.')+(nm?' Its '+nm+(nm===1?' milestone is':' milestones are')+' deleted.':'')+(S.invoices.some(i=>i.projectId===p.id)?' Its invoices stay with '+clientName(p.clientId)+'.':''), 'Delete project', async()=>{ await api.del('projects',p.id); go({name:'projects'}); });
+    const n=S.txns.filter(t=>t.projectId===p.id).length, nm=S.milestones.filter(m=>m.projectId===p.id).length, nk=S.tasks.filter(t=>t.projectId===p.id).length, nt=S.time_entries.filter(e=>e.projectId===p.id).length;
+    confirmSheet('Delete '+p.name+'?', (n ? 'Its '+n+(n===1?' money entry stays':' money entries stay')+' with '+clientName(p.clientId)+', under “No project”.' : 'This can’t be undone.')+(nm?' Its '+nm+(nm===1?' milestone is':' milestones are')+' deleted.':'')+(nk?' Its '+nk+(nk===1?' task is':' tasks are')+' deleted.':'')+(nt?' Its '+nt+(nt===1?' time entry is':' time entries are')+' deleted.':'')+(S.invoices.some(i=>i.projectId===p.id)?' Its invoices stay with '+clientName(p.clientId)+'.':''), 'Delete project', async()=>{ await api.del('projects',p.id); go({name:'projects'}); });
   }, deleteLabel:'Delete project'}:{});
 }
 
@@ -1005,8 +1095,22 @@ function renderInvoices(v){
   v.appendChild(list.length ? h('div',{class:'list'},list.map(invoiceRow)) : h('div',{class:'empty'},'No invoices here.'));
 }
 
+// Paid comes from payments, so taking a paid invoice back to Draft or Sent means removing the payments recorded for it.
+// Asks first, lists them, and does nothing until confirmed.
+function reopenInvoice(inv,to){
+  const pays=S.txns.filter(t=>t.invoiceId===inv.id && t.type!=='out'), total=pays.reduce((a,t)=>a+t.amount,0);
+  const patch=to==='sent'?{status:'sent',sent_at:inv.sentAt||new Date().toISOString()}:{status:to};
+  const set=async()=>{ await api.update('invoices',inv.id,patch); };
+  if(!pays.length) return quietly(set);
+  confirmSheet('Move '+inv.number+' back to '+(to==='sent'?'Sent':'Draft')+'?',
+    'Its payments ('+pays.map(t=>rs(t.amount)+' on '+fmtDate(t.date)).join(', ')+', '+rs(total)+' in all) will be deleted so it is owed again. To keep them, cancel and edit or delete a payment yourself.',
+    'Delete payments and move back', async()=>{
+      const { error } = await db.from('txns').delete().in('id',pays.map(t=>t.id)); if(error) throw error;
+      await set();
+    });
+}
 // Draft → Sent → Paid, or Cancelled. Overdue and part paid stay in Sent with their label. Paid comes from payments,
-// so moving a card to Paid opens Record payment; an invoice its payments already cover can't go back to Draft or Sent.
+// so moving a card to Paid opens Record payment; moving a paid card back to Draft or Sent deletes its payments (after asking).
 function invoiceBoard(all){
   const col = x => x.state==='cancelled'?'cancelled' : x.state==='paid'?'paid' : x.state==='draft'?'draft' : 'sent';
   const cols=[['draft','Draft'],['sent','Sent'],['paid','Paid'],['cancelled','Cancelled']];
@@ -1014,7 +1118,7 @@ function invoiceBoard(all){
   return board(cols.map(([k,l])=>{
     const xs=sorted.filter(x=>col(x)===k);
     return { key:k, label:l, sub:rs(xs.reduce((a,x)=>a+(k==='sent'?x.due:k==='cancelled'?0:x.i.total),0)), cards:xs.map(x=>({ id:x.i.id, name:x.i.number,
-      moves: k==='paid' ? (x.paid>=x.i.total ? [] : ['draft','sent','cancelled']) : ['draft','sent','paid','cancelled'].filter(t=>t!==k && !(k==='cancelled'&&t==='paid')),
+      moves: k==='paid' ? ['draft','sent','cancelled'] : ['draft','sent','paid','cancelled'].filter(t=>t!==k && !(k==='cancelled'&&t==='paid')),
       body:[h('a',{class:'title num',href:hrefOf({name:'invoice',id:x.i.id})},x.i.number),
         h('div',{class:'sub'},clientName(x.i.clientId)+(projOf(x.i.projectId)?' · '+projOf(x.i.projectId).name:'')),
         h('div',{class:'num'},rs(owing(x)?x.due:x.i.total)+(owing(x)&&x.paid?' due':''))],
@@ -1024,6 +1128,7 @@ function invoiceBoard(all){
   }), (id,to)=>{
     const inv=invOf(id), s=invState(inv);
     if(to==='paid') return openMoneySheet({clientId:inv.clientId,projectId:inv.projectId,invoice:inv,amount:s.due||inv.total});
+    if(s.state==='paid' && to!=='cancelled') return reopenInvoice(inv,to);
     quietly(()=>api.update('invoices',id,to==='sent'?{status:'sent',sent_at:inv.sentAt||new Date().toISOString()}:{status:to}));
   }, 'Invoices by stage');
 }
@@ -1065,6 +1170,7 @@ function renderInvoice(v,id){
         h('button',{class:'btn',type:'button',onclick:()=>window.print()},'Print / PDF'),
         canWrite()&&s.state!=='cancelled'?h('button',{class:'btn',type:'button',onclick:()=>openInvoiceSheet({invoice:inv})},'Edit'):null,
         canWrite()&&inv.status==='draft'?h('button',{class:'btn',type:'button',onclick:act(()=>api.update('invoices',inv.id,{status:'sent',sent_at:new Date().toISOString()}))},'Mark sent'):null,
+        canWrite()&&s.state==='paid'?h('button',{class:'btn',type:'button',onclick:()=>reopenInvoice(inv,'sent')},'Mark unpaid'):null,
         canWrite()&&open&&inv.status!=='draft'?h('button',{class:'btn',type:'button',onclick:()=>openReminderSheet(inv)},'Remind'):null,
         canWrite()&&open?h('button',{class:'btn primary',type:'button',onclick:()=>openMoneySheet({clientId:inv.clientId,projectId:inv.projectId,invoice:inv,amount:s.due})},'Record payment'):null)),
     setupNotice(),
@@ -1315,8 +1421,8 @@ function renderLogin(v){
 const cfg = window.LEDGER_CONFIG || {};
 const sb = (window.supabase && cfg.supabaseUrl && cfg.supabaseAnonKey) ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey) : null;
 const ms = t => t ? Date.parse(t) : 0;
-const TABLES = ['clients','projects','txns','milestones','invoices','settings','services'];
-const OPTIONAL = ['milestones','invoices','settings','services']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
+const TABLES = ['clients','projects','txns','milestones','invoices','settings','services','tasks','time_entries'];
+const OPTIONAL = ['milestones','invoices','settings','services','tasks','time_entries']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
 // Columns added for the dashboard default to empty, so the app still loads before supabase/schema.sql is re-run.
 const map = {
   clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
@@ -1324,6 +1430,8 @@ const map = {
     previewUrl:cleanUrl(r.preview_url)||'', liveUrl:cleanUrl(r.live_url)||'', githubUrl:cleanUrl(r.github_url)||'', startDate:r.start_date||null, dueDate:r.due_date||null, createdAt:ms(r.created_at) }),
   txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, invoiceId:r.invoice_id||null, createdAt:ms(r.created_at) }),
   milestones: r => ({ id:r.id, projectId:r.project_id, name:r.name||'', amount:Number(r.amount)||0, dueDate:r.due_date||null, order:r.sort_order??0, createdAt:ms(r.created_at) }),
+  tasks: r => ({ id:r.id, projectId:r.project_id, title:r.title||'', done:!!r.done, dueDate:r.due_date||null, order:r.sort_order??0, doneAt:r.done_at||null, createdAt:ms(r.created_at) }),
+  time_entries: r => ({ id:r.id, projectId:r.project_id, date:r.date||null, minutes:Number(r.minutes)||0, note:r.note||'', createdAt:ms(r.created_at) }),
   invoices: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, milestoneId:r.milestone_id||null, number:r.number, issueDate:r.issue_date, dueDate:r.due_date||null,
     total:Number(r.total)||0, status:r.status||'draft', notes:r.notes||'', sentAt:r.sent_at||null, lastReminded:r.last_reminded||null, reminderCount:r.reminder_count||0, createdAt:ms(r.created_at),
     items:(Array.isArray(r.items)?r.items:[]).map(i=>({description:i.description||'', quantity:Number(i.quantity)||0, rate:Number(i.rate)||0})) }),
@@ -1369,7 +1477,7 @@ if(!sb){
     S.authReady=true; S.session=session;
     if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
     if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
-    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.ready=false; closeSheet(); render(); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.tasks=[]; S.time_entries=[]; S.ready=false; closeSheet(); render(); }
   });
 }
 })();

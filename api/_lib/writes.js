@@ -109,13 +109,17 @@ async function deleteClient(db, a) {
   const projects = L.raw.projects.filter(p => p.client_id === c.id), txns = L.raw.txns.filter(t => t.client_id === c.id);
   const milestones = L.raw.milestones.filter(m => projects.some(p => p.id === m.project_id)), invoices = L.raw.invoices.filter(i => i.client_id === c.id);
   const services = L.raw.services.filter(x => x.client_id === c.id);
+  const tasks = L.raw.tasks.filter(t => projects.some(p => p.id === t.project_id)), timeEntries = L.raw.time_entries.filter(e => projects.some(p => p.id === e.project_id));
   if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length, invoices: invoices.map(i => i.number), services: services.map(x => x.name),
+    tasks: tasks.length, timeEntries: timeEntries.length,
     moneyIn: txns.filter(t => t.type !== 'out').reduce((s, t) => s + Number(t.amount), 0), moneyOut: txns.filter(t => t.type === 'out').reduce((s, t) => s + Number(t.amount), 0) });
   const ch = new Change(db, 'Deleted client ' + c.name + ' with ' + projects.length + ' projects and ' + txns.length + ' entries'); await ch.ready();
   for (const t of txns) await ch.remove('txns', t);
   for (const i of invoices) await ch.remove('invoices', i);
   for (const x of services) await ch.remove('services', x);
   for (const m of milestones) await ch.remove('milestones', m);
+  for (const t of tasks) await ch.remove('tasks', t);
+  for (const e of timeEntries) await ch.remove('time_entries', e);
   for (const p of projects) await ch.remove('projects', p);
   await ch.remove('clients', c);
   return done('Deleted ' + c.name + ', their ' + projects.length + ' projects and ' + txns.length + ' money entries.', {}, await ch.commit());
@@ -169,7 +173,7 @@ async function updateProject(db, a) {
     for (const t of L.raw.txns.filter(t => t.project_id === before.id)) await ch.update('txns', t, { client_id: patch.client_id });
   }
   const p = await ch.update('projects', before, patch);
-  const now = new Ledger(L.raw.clients, L.raw.projects.map(x => x.id === p.id ? p : x), L.raw.txns, L.raw.milestones);
+  const now = new Ledger(L.raw.clients, L.raw.projects.map(x => x.id === p.id ? p : x), L.raw.txns, L.raw.milestones, L.raw.invoices, L.raw.settings, L.raw.services, L.raw.tasks, L.raw.time_entries);
   return done('Updated "' + p.name + '" (' + Object.keys(patch).map(k => ({ name: 'title', client_id: 'client' })[k] || k).join(', ') + ').', { project: now.projectSummary(now.project(p.id)) }, await ch.commit());
 }
 
@@ -178,14 +182,17 @@ async function deleteProject(db, a) {
   const r = L.resolveProject(a.project, a.client); if (r.error) return r;
   const p = L.raw.projects.find(x => x.id === r.project.id), txns = L.raw.txns.filter(t => t.project_id === p.id);
   const milestones = L.raw.milestones.filter(m => m.project_id === p.id), invoices = L.raw.invoices.filter(i => i.project_id === p.id);
+  const tasks = L.raw.tasks.filter(t => t.project_id === p.id), timeEntries = L.raw.time_entries.filter(e => e.project_id === p.id);
   const label = p.name + ' (' + L.clientName(p.client_id) + ')';
-  if (a.confirm !== true) return confirmFirst('deleted', { project: label, transactions: txns.length, milestones: milestones.length,
+  if (a.confirm !== true) return confirmFirst('deleted', { project: label, transactions: txns.length, milestones: milestones.length, tasks: tasks.length, timeEntries: timeEntries.length,
     whatHappensToMoney: txns.length ? (a.delete_transactions ? 'Its ' + txns.length + ' money entries will be deleted too.' : 'Its ' + txns.length + ' money entries stay with the client under "No project". Pass delete_transactions: true to delete them instead.') : 'It has no money entries.' });
   const ch = new Change(db, 'Deleted project ' + label); await ch.ready();
   for (const t of txns) { if (a.delete_transactions) await ch.remove('txns', t); else await ch.update('txns', t, { project_id: null }); }
   for (const i of invoices) await ch.update('invoices', i, { project_id: null, milestone_id: null }); // invoices stay with the client
   for (const x of L.raw.services.filter(x => x.project_id === p.id)) await ch.update('services', x, { project_id: null }); // and so do services
   for (const m of milestones) await ch.remove('milestones', m);
+  for (const t of tasks) await ch.remove('tasks', t);
+  for (const e of timeEntries) await ch.remove('time_entries', e);
   await ch.remove('projects', p);
   return done('Deleted ' + label + (txns.length ? (a.delete_transactions ? ' and its ' + txns.length + ' money entries.' : '. Its ' + txns.length + ' money entries are now under "No project".') : '.'), {}, await ch.commit());
 }
@@ -481,6 +488,69 @@ async function renewService(db, a) {
 }
 
 // ---------- history and undo ----------
+// ---------- tasks and time ----------
+// Tasks sort by due date and then the order they were added; sort_order keeps that order for tasks with no date.
+async function addTasks(db, a) {
+  const L = await load(db);
+  const r = L.resolveProject(a.project, a.client); if (r.error) return r;
+  if (!Array.isArray(a.tasks) || !a.tasks.length) fail('Give at least one task, like ["Design homepage", "Set up hosting"].');
+  if (a.tasks.length > 50) fail('Add at most 50 tasks at a time.');
+  const label = L.projectLabel(r.project), start = L.tasks.filter(t => t.projectId === r.project.id).length;
+  const rows = a.tasks.map((t, i) => {
+    const o = typeof t === 'string' ? { title: t } : (t || {}), title = text(o.title, 300);
+    if (!title) fail('Task ' + (i + 1) + ' needs a title.');
+    return { project_id: r.project.id, title, due_date: o.due_date ? date(o.due_date, 'Task ' + (i + 1) + ' due date') : null, sort_order: start + i };
+  });
+  const ch = new Change(db, 'Added ' + rows.length + (rows.length === 1 ? ' task to ' : ' tasks to ') + label); await ch.ready();
+  const out = await ch.insert('tasks', rows);
+  const L2 = new Ledger(L.raw.clients, L.raw.projects, [], [], [], [], [], out);
+  return done('Added ' + rows.length + (rows.length === 1 ? ' task' : ' tasks') + ' to ' + label + '.', { tasks: out.map(t => L2.taskSummary(L2.tasks.find(x => x.id === t.id))) }, await ch.commit());
+}
+
+async function updateTask(db, a) {
+  const L = await load(db);
+  const r = L.resolveTask(a.task, a.project, a.client); if (r.error) return r;
+  const before = L.raw.tasks.find(t => t.id === r.task.id), patch = {};
+  if (given(a.title)) { patch.title = text(a.title, 300); if (!patch.title) fail('The task title can\'t be empty.'); }
+  if (given(a.due_date)) patch.due_date = date(a.due_date, 'Due date');
+  if (given(a.done)) {
+    if (typeof a.done !== 'boolean') fail('done must be true or false.');
+    if (a.done !== !!before.done) { patch.done = a.done; patch.done_at = a.done ? new Date().toISOString() : null; }
+  }
+  if (!Object.keys(patch).length) fail('Say what to change on the task: title, done or due_date.');
+  const ch = new Change(db, (patch.done === true ? 'Completed task ' : 'Edited task ') + before.title); await ch.ready();
+  const row = await ch.update('tasks', before, patch);
+  const L2 = new Ledger(L.raw.clients, L.raw.projects, [], [], [], [], [], [row]);
+  return done((patch.done === true ? 'Marked done: ' : 'Updated: ') + row.title + '.', { task: L2.taskSummary(L2.tasks[0]) }, await ch.commit());
+}
+
+async function deleteTask(db, a) {
+  const L = await load(db);
+  const r = L.resolveTask(a.task, a.project, a.client); if (r.error) return r;
+  const t = L.raw.tasks.find(x => x.id === r.task.id), sum = L.taskSummary(r.task);
+  if (a.confirm !== true) return confirmFirst('deleted', { task: sum });
+  const ch = new Change(db, 'Deleted task ' + t.title); await ch.ready();
+  await ch.remove('tasks', t);
+  return done('Deleted the task "' + t.title + '".', {}, await ch.commit());
+}
+
+// Time is logged in minutes; hours are accepted and turned into minutes (1.5 hours = 90).
+async function logTime(db, a) {
+  const L = await load(db);
+  const r = L.resolveProject(a.project, a.client); if (r.error) return r;
+  if (given(a.minutes) === given(a.hours)) fail('Give the time as either minutes or hours.');
+  const minutes = given(a.minutes) ? Number(a.minutes) : Math.round(Number(a.hours) * 60);
+  if (!Number.isInteger(minutes) || minutes <= 0) fail('The time must be a whole number of minutes above 0 (or hours that come to at least a minute).');
+  if (minutes > 1440) fail('One entry can be at most 24 hours. Split longer work across days.');
+  const label = L.projectLabel(r.project), d = a.date === undefined ? todayIST() : date(a.date, 'Date');
+  if (!d) fail('The date can\'t be empty.');
+  const ch = new Change(db, 'Logged ' + niceDuration(minutes) + ' on ' + label); await ch.ready();
+  const [row] = await ch.insert('time_entries', { project_id: r.project.id, date: d, minutes, note: text(a.note, 500) });
+  const L2 = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, [], [], [], [], L.raw.tasks, [...L.raw.time_entries, row]);
+  return done('Logged ' + niceDuration(minutes) + ' on ' + label + '.', { entry: L2.timeSummary(L2.timeEntries.find(e => e.id === row.id)), projectTime: L2.projectTime(L2.project(r.project.id)) }, await ch.commit());
+}
+const niceDuration = m => (m >= 60 ? Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '') : m + 'm');
+
 async function listChanges(db, a) {
   const rows = await db.select('activity_log');
   const batches = {};
@@ -506,13 +576,13 @@ async function undoChange(db, a) {
   // Undoing an insert deletes the row; refuse if something added later depends on it.
   for (const e of entries.filter(e => e.op === 'insert')) {
     const deps = e.table_name === 'clients' ? [...L.raw.projects.filter(p => p.client_id === e.row_id), ...L.raw.txns.filter(t => t.client_id === e.row_id), ...L.raw.invoices.filter(i => i.client_id === e.row_id), ...L.raw.services.filter(x => x.client_id === e.row_id)]
-      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id), ...L.raw.invoices.filter(i => i.project_id === e.row_id), ...L.raw.services.filter(x => x.project_id === e.row_id)]
+      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id), ...L.raw.invoices.filter(i => i.project_id === e.row_id), ...L.raw.services.filter(x => x.project_id === e.row_id), ...L.raw.tasks.filter(t => t.project_id === e.row_id), ...L.raw.time_entries.filter(x => x.project_id === e.row_id)]
       : e.table_name === 'milestones' ? L.raw.invoices.filter(i => i.milestone_id === e.row_id)
       : e.table_name === 'invoices' ? L.raw.txns.filter(t => t.invoice_id === e.row_id) : [];
     const later = deps.filter(d => !insertedHere.has(d.id));
     if (later.length) return { error: 'Can\'t undo "' + e.summary + '": ' + later.length + ' newer item(s) were added to what it created. Undo or move those first.' };
   }
-  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones, settings: L.raw.settings, invoices: L.raw.invoices, services: L.raw.services };
+  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones, settings: L.raw.settings, invoices: L.raw.invoices, services: L.raw.services, tasks: L.raw.tasks, time_entries: L.raw.time_entries };
   const skipped = [];
   for (const e of entries) {
     const exists = current[e.table_name].some(r => r.id === e.row_id);
@@ -525,4 +595,4 @@ async function undoChange(db, a) {
 }
 
 module.exports = { createClient, updateClient, deleteClient, createProject, updateProject, deleteProject, setMilestones, addTransactions, updateTransaction, deleteTransactions,
-  getSettings, updateSettings, createInvoice, updateInvoice, logReminder, addService, updateService, renewService, listChanges, undoChange, Invalid };
+  getSettings, updateSettings, createInvoice, updateInvoice, logReminder, addService, updateService, renewService, addTasks, updateTask, deleteTask, logTime, listChanges, undoChange, Invalid };

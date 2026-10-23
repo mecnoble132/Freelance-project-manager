@@ -16,6 +16,9 @@
 //                        Edustudy monthly care plan, 0 / 2,000 monthly, renews 1 Dec
 //                        Edustudy Google Workspace, stopped (inactive)
 //     yearly from active ones: revenue 31,500, cost 3,800, profit 27,700
+//   Tasks on GeekBoz Website: "Send design for approval" due 20 Oct (overdue), "Set up hosting" due 27 Oct (this week),
+//                             "Write launch email" (no date), "Buy the domain" (done). Edustudy Website has none.
+//   Time on GeekBoz Website: 5h on 5 Oct + 1h 30m on 10 Oct = 6h 30m (390 minutes); 20,000 received = 3,076.92 earned per hour
 const { mock } = require('node:test');
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
@@ -51,7 +54,15 @@ const ids = {
   svcHosting: '99999999-0000-4000-8000-000000000002',
   svcCare: '99999999-0000-4000-8000-000000000003',
   svcStopped: '99999999-0000-4000-8000-000000000004',
-  otherSvc: '99999999-0000-4000-8000-000000000005'
+  otherSvc: '99999999-0000-4000-8000-000000000005',
+  taskDesign: '88888888-0000-4000-8000-000000000001',
+  taskHosting: '88888888-0000-4000-8000-000000000002',
+  taskEmail: '88888888-0000-4000-8000-000000000003',
+  taskDomain: '88888888-0000-4000-8000-000000000004',
+  otherTask: '88888888-0000-4000-8000-000000000005',
+  timeDesign: '77777777-0000-4000-8000-000000000001',
+  timeRevisions: '77777777-0000-4000-8000-000000000002',
+  otherTime: '77777777-0000-4000-8000-000000000003'
 };
 
 function seed(store) {
@@ -90,12 +101,22 @@ function seed(store) {
   svc(ids.svcHosting, ids.geekboz, ids.gbSite, 'hosting', 'Hostinger Business', 3000, 6000, 'yearly', '2026-10-20', { provider: 'Hostinger', auto_renew: true });
   svc(ids.svcCare, ids.edustudy, ids.eduSite, 'maintenance', 'Monthly care plan', 0, 2000, 'monthly', '2026-12-01');
   svc(ids.svcStopped, ids.edustudy, null, 'email', 'Google Workspace', 1500, 2000, 'yearly', '2026-10-25', { active: false });
+  const task = (id, project_id, title, extra = {}, uid = OWNER) => store.insert('tasks', { id, project_id, title, ...extra }, uid);
+  task(ids.taskDesign, ids.gbSite, 'Send design for approval', { due_date: '2026-10-20', sort_order: 0 });
+  task(ids.taskHosting, ids.gbSite, 'Set up hosting', { due_date: '2026-10-27', sort_order: 1 });
+  task(ids.taskEmail, ids.gbSite, 'Write launch email', { sort_order: 2 });
+  task(ids.taskDomain, ids.gbSite, 'Buy the domain', { done: true, done_at: '2026-10-06T08:00:00Z', sort_order: 3 });
+  const time = (id, project_id, date, minutes, note, uid = OWNER) => store.insert('time_entries', { id, project_id, date, minutes, note }, uid);
+  time(ids.timeDesign, ids.gbSite, '2026-10-05', 300, 'Homepage design');
+  time(ids.timeRevisions, ids.gbSite, '2026-10-10', 90, 'Revisions');
   // Someone else's data in the same database, which must never show up or change.
   c(ids.otherClient, 'GeekBoz', { contact: 'not yours' }, OTHER);
   p(ids.otherProject, ids.otherClient, 'Website', { quoted: 99999 }, OTHER);
   t(ids.otherTxn, ids.otherClient, ids.otherProject, 'in', 77777, { note: 'Advance', date: '2026-10-10' }, OTHER);
   m(ids.otherMs, ids.otherProject, 'Theirs', 99999, '2026-01-01', 0, OTHER);
   store.insert('settings', { business_name: 'Not yours', upi_id: 'other@ybl' }, OTHER);
+  task(ids.otherTask, ids.otherProject, 'Theirs', { due_date: '2026-10-01' }, OTHER);
+  time(ids.otherTime, ids.otherProject, '2026-10-10', 600, 'Theirs', OTHER);
   svc(ids.otherSvc, ids.otherClient, ids.otherProject, 'domain', 'geekboz.in', 1, 99999, 'yearly', '2026-10-24', {}, OTHER);
   inv(ids.otherInv, ids.otherClient, ids.otherProject, null, 'INV/2026-27/001', '2026-10-01', '2026-10-08', [{ description: 'Theirs', quantity: 1, rate: 99999 }], 'sent', {}, OTHER);
   return store;
