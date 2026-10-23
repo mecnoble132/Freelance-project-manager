@@ -233,6 +233,8 @@ textarea{resize:vertical;min-height:90px}
 .renew-steps{margin:0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}
 .renew-steps label{display:flex;gap:10px;align-items:flex-start;font-size:14px}
 .renew-steps input{width:auto;margin-top:3px}
+#toast{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:30;max-width:min(92vw,520px);background:var(--out);color:#fff;font-size:14px;font-weight:600;padding:10px 16px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+#toast[hidden]{display:none}
 .task-check{width:20px;height:20px;flex:none;padding:0;accent-color:var(--accent)}
 .task-done{text-decoration:line-through;color:var(--muted)}
 .head-actions{display:flex;gap:10px;align-items:center}
@@ -260,13 +262,14 @@ textarea{resize:vertical;min-height:90px}
   <div id="view"><div class="empty">Loading your projects and money…</div></div>
 </div>
 <div id="sheet-root"></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script src="config.js"></script>
 <script>
 (function(){
-const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], services:[], tasks:[], time_entries:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
+const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], services:[], tasks:[], time_entries:[], raw:{}, iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
   period:pref('period','this_fy'), pView:pref('projectView','list'), iView:pref('invoiceView','list'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
@@ -326,7 +329,7 @@ function parseHash(){ const parts=location.hash.replace(/^#\/?/,'').split('/'); 
   if((n==='project'||n==='client'||n==='invoice') && parts[1]) return {name:n,id:decodeURIComponent(parts[1])};
   return {name:['projects','clients','money','invoices','renewals'].includes(n)?n:'home'}; }
 const hrefOf = v => v.name==='home' ? '#/' : '#/'+v.name+(v.id?'/'+encodeURIComponent(v.id):'');
-function go(v){ const href=hrefOf(v); if(location.hash===href) render(); else location.hash=href; }
+function go(v){ const href=hrefOf(v); S.view=v; if(location.hash===href) render(); else location.hash=href; } // S.view is set first: the hashchange that follows is async, and a redraw before it must already know where we're going
 window.addEventListener('hashchange',()=>{ S.view=parseHash(); closeSheet(); render(); window.scrollTo(0,0); });
 
 function render(){
@@ -801,9 +804,7 @@ function renderMoney(v){
 
 function toastErr(e){
   console.warn(e);
-  const missingCol = e && (e.code==='PGRST204' || e.code==='PGRST205' || /column|table/i.test(e.message||''));
-  const m = missingCol ? 'The database is missing new tables or fields. Run supabase/schema.sql in the Supabase SQL editor, then try again.' : 'Couldn’t save that. Check your connection and try again.';
-  const r=$('#sheet-err'); if(r) r.textContent=m;
+  const r=$('#sheet-err'); if(r) r.textContent=saveErrText(e);
 }
 
 // ---------- sheets ----------
@@ -1105,7 +1106,7 @@ function reopenInvoice(inv,to){
   confirmSheet('Move '+inv.number+' back to '+(to==='sent'?'Sent':'Draft')+'?',
     'Its payments ('+pays.map(t=>rs(t.amount)+' on '+fmtDate(t.date)).join(', ')+', '+rs(total)+' in all) will be deleted so it is owed again. To keep them, cancel and edit or delete a payment yourself.',
     'Delete payments and move back', async()=>{
-      const { error } = await db.from('txns').delete().in('id',pays.map(t=>t.id)); if(error) throw error;
+      for(const t of pays) await api.del('txns',t.id);
       await set();
     });
 }
@@ -1440,22 +1441,90 @@ const map = {
   services: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, kind:r.kind||'other', name:r.name||'', provider:r.provider||'', cost:Number(r.cost)||0, price:Number(r.price)||0,
     cycle:r.cycle||'yearly', nextRenewal:r.next_renewal, autoRenew:!!r.auto_renew, active:r.active!==false, notes:r.notes||'', createdAt:ms(r.created_at) })
 };
-async function load(){
+// What a failed save says. A missing table or column means schema.sql hasn't been run yet.
+function saveErrText(e){
+  const missingCol = e && (e.code==='PGRST204' || e.code==='PGRST205' || /column|table/i.test(e.message||''));
+  return missingCol ? 'The database is missing new tables or fields. Run supabase/schema.sql in the Supabase SQL editor, then try again.' : 'Couldn’t save that. Check your connection and try again.';
+}
+let toastTimer=null;
+function toast(msg){
+  const el=$('#toast'); if(!el) return;
+  el.textContent=msg; el.hidden=false;
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>{ el.hidden=true; },7000);
+}
+let loadGen=0, writeSeq=0, pending=0, needsSync=false, writes=Promise.resolve();
+// Loads every table. A quiet load (after deletes, or when you come back to the tab) only redraws if something changed.
+// A result is dropped if a newer load started, or a save was made since it began: it would be older than what's on screen.
+async function load(quiet){
+  const gen=++loadGen, seq=writeSeq;
   const res = await Promise.all(TABLES.map(t=>sb.from(t).select('*')));
+  if(gen!==loadGen || seq!==writeSeq || (S.ready && pending>0)) return;
   const bad = res.find((r,i)=>r.error && !OPTIONAL.includes(TABLES[i]));
   if(bad){ S.error='Couldn’t load your ledger: '+bad.error.message; render(); return; }
-  TABLES.forEach((t,i)=>{ S[t]=(res[i].error?[]:res[i].data).map(map[t]); });
+  const next = TABLES.map((t,i)=>res[i].error?[]:res[i].data);
+  if(quiet && S.ready && TABLES.every((t,i)=>JSON.stringify(next[i])===JSON.stringify(S.raw[t]))) return;
+  TABLES.forEach((t,i)=>setRaw(t,next[i]));
   S.ready=true; S.error=''; render();
 }
+// S.raw holds the rows as the database has them; S.clients, S.projects… are those rows turned into what the screens use.
+const raw = t => S.raw[t] || (S.raw[t]=[]);
+function setRaw(t,rows){ S.raw[t]=rows; S[t]=rows.map(map[t]); }
+const remap = () => TABLES.forEach(t=>setRaw(t,raw(t)));
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : '10000000-1000-4000-8000-100000000000'.replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16)));
+// What the database does to other rows when one is deleted (cascade = delete them too, null = clear the link). tests/consistency.test.js keeps this in step with schema.sql.
+const ON_DELETE = {
+  clients: [['projects','client_id','cascade'],['txns','client_id','cascade'],['invoices','client_id','cascade'],['services','client_id','cascade']],
+  projects: [['milestones','project_id','cascade'],['tasks','project_id','cascade'],['time_entries','project_id','cascade'],['txns','project_id','null'],['invoices','project_id','null'],['services','project_id','null']],
+  milestones: [['invoices','milestone_id','null']],
+  invoices: [['txns','invoice_id','null']]
+};
+function dropRow(t,id){
+  S.raw[t]=raw(t).filter(r=>r.id!==id);
+  for(const [child,col,how] of ON_DELETE[t]||[]){
+    if(how==='cascade') raw(child).filter(r=>r[col]===id).forEach(r=>dropRow(child,r.id));
+    else S.raw[child]=raw(child).map(r=>r[col]===id?{...r,[col]:null}:r);
+  }
+}
+// Saves go to the database one after another, in the background, so a payment for a brand-new project still lands after the project.
+// If one fails the screen goes back to what the database really has, and a message says so.
+function send(fn){
+  pending++; writeSeq++;
+  writes = writes.then(async()=>{
+    try{ await fn(); }
+    catch(e){ console.warn(e); toast(saveErrText(e)); needsSync=true; }
+    finally{ pending--; if(!pending && needsSync){ needsSync=false; await load(true); } }
+  });
+  return writes;
+}
+// Every save shows on screen at once; the database catches up behind it.
 const api = {
-  async insert(table,row){ const { data, error } = await sb.from(table).insert(row).select('id').single(); if(error) throw error; await load(); return data.id; },
-  async update(table,id,row){ const { error } = await sb.from(table).update(row).eq('id',id); if(error) throw error; await load(); },
-  async del(table,id){ const { error } = await sb.from(table).delete().eq('id',id); if(error) throw error; await load(); },
+  async insert(table,row){
+    const id = row.id || uuid();
+    setRaw(table, raw(table).concat([{...row, id, created_at:new Date().toISOString()}]));
+    render();
+    send(async()=>{ const { error } = await sb.from(table).insert({...row, id}); if(error) throw error; });
+    return id;
+  },
+  async update(table,id,row){
+    setRaw(table, raw(table).map(r=>r.id===id?{...r,...row}:r));
+    render();
+    send(async()=>{ const { error } = await sb.from(table).update(row).eq('id',id); if(error) throw error; });
+  },
+  async del(table,id){
+    dropRow(table,id); remap(); render();
+    needsSync = true; // deleting touches other rows, so check the result against the database once the saves are done
+    send(async()=>{ const { error } = await sb.from(table).delete().eq('id',id); if(error) throw error; });
+  },
   // The new list goes in before the old rows come out, so a failed save never loses the old milestones.
   async replaceMilestones(oldIds,rows){
-    if(rows.length){ const { error } = await sb.from('milestones').insert(rows); if(error) throw error; }
-    for(const id of oldIds){ const { error } = await sb.from('milestones').delete().eq('id',id); if(error) throw error; }
-    await load();
+    const now=new Date().toISOString(), fresh=rows.map(r=>({...r, id:uuid(), created_at:now}));
+    oldIds.forEach(id=>dropRow('milestones',id));
+    setRaw('milestones', raw('milestones').concat(fresh)); remap(); render();
+    needsSync = true;
+    send(async()=>{
+      if(fresh.length){ const { error } = await sb.from('milestones').insert(fresh); if(error) throw error; }
+      for(const id of oldIds){ const { error } = await sb.from('milestones').delete().eq('id',id); if(error) throw error; }
+    });
   }
 };
 function openNewPasswordSheet(){
@@ -1473,11 +1542,13 @@ render();
 if(!sb){
   S.authReady=true; S.session={}; S.error='The app isn’t set up yet. Add your Supabase project URL and anon key to config.js.'; render();
 } else {
+  // Changes made elsewhere (through Claude, or on another device) show up when you come back to the tab.
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden && S.ready && S.session && S.session.user) load(true); });
   sb.auth.onAuthStateChange((event, session)=>{
     S.authReady=true; S.session=session;
     if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
     if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
-    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.tasks=[]; S.time_entries=[]; S.ready=false; closeSheet(); render(); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.tasks=[]; S.time_entries=[]; S.raw={}; S.ready=false; closeSheet(); render(); }
   });
 }
 })();

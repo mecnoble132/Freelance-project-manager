@@ -19,6 +19,7 @@
     const run = () => {
       try {
         if (!uid()) return { data: null, error: { message: 'JWT expired', code: 'PGRST301' } };
+        if (op !== 'select' && window.__failWrites) return { data: null, error: { message: 'network down' } }; // set by a test
         if (op === 'select') return { data: store.select(table, own()), error: null };
         if (op === 'insert') {
           const rows = [].concat(payload).map(r => {
@@ -40,7 +41,8 @@
       eq(col, v) { const prev = filter; filter = r => (!prev || prev(r)) && r[col] === v; return b; },
       in(col, vs) { const prev = filter; filter = r => (!prev || prev(r)) && vs.includes(r[col]); return b; },
       single() { single = true; return b; },
-      then(resolve, reject) { return Promise.resolve().then(run).then(resolve, reject); }
+      // window.__latency (set by a test) makes every call take that many milliseconds, like a slow connection.
+      then(resolve, reject) { return new Promise(r => window.__latency ? setTimeout(r, window.__latency) : r()).then(run).then(resolve, reject); }
     };
     return b;
   }
