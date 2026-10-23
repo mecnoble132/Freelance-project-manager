@@ -152,6 +152,26 @@ test('a connected app can use the tools, and only sees its own user\'s data', as
   assert.equal(sum.json.result.isError, false);
 });
 
+test('a connected app is offered the tasks and time tools, and can use them', async t => {
+  ctx(t);
+  const { tokens } = await connect();
+  const a = tokens.access_token;
+  const list = await rpc(a, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  const names = list.json.result.tools.map(x => x.name);
+  for (const n of ['list_tasks', 'list_time', 'add_task', 'update_task', 'delete_task', 'log_time']) assert.ok(names.includes(n), n + ' is missing from tools/list');
+  const call = async (id, name, args) => (await rpc(a, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })).json.result;
+  const added = await call(2, 'add_task', { project: 'GeekBoz Website', tasks: [{ title: 'Send the invoice', due_date: '2026-10-25' }] });
+  assert.equal(added.isError, false, JSON.stringify(added));
+  assert.equal(added.structuredContent.tasks[0].title, 'Send the invoice');
+  const open = await call(3, 'list_tasks', { project: 'GeekBoz Website' });
+  assert.ok(open.structuredContent.tasks.some(x => x.title === 'Send the invoice'));
+  const done = await call(4, 'update_task', { task: 'Send the invoice', done: true });
+  assert.equal(done.structuredContent.task.done, true);
+  const logged = await call(5, 'log_time', { project: 'GeekBoz Website', hours: 2, note: 'Invoice work' });
+  assert.equal(logged.structuredContent.entry.minutes, 120);
+  assert.equal((await call(6, 'list_time', { project: 'GeekBoz Website' })).structuredContent.totalMinutes, 510); // 390 seeded + 120
+});
+
 test('MCP protocol details', async t => {
   ctx(t);
   const { tokens } = await connect();
