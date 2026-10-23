@@ -11,7 +11,7 @@ My personal web app for running my website development service: every client, ev
 - **Dashboard**: revenue, spending, profit and margin for this financial year (April–March, the default), last financial year, this month, the last 12 months, this calendar year or all time; money still to collect; a month-by-month chart of money in and out; most profitable projects; where the money went by category; recent money
 - **Projects**: every project as a card with its client, status (Lead, In progress, On hold, Done), description, preview / live / GitHub links, quoted price, how much is paid, spent and profit. Filter by status and search
 - **Project page**: all of the above plus start and due dates and every payment and expense on it
-- **Payment milestones**: split a project's price into stages (quick 50/50 or 50/30/20 splits, or your own), each with a due date. Payments cover them in order, so each shows as paid, part paid, not paid yet or overdue, and projects with an overdue milestone show "₹X overdue"
+- **Payment milestones**: split a project's price into stages (quick 50/50 or 50/30/20 splits, or your own), each with a due date. The last milestone fills in the rest of the quote and updates as you type the others. Payments cover them in order, so each shows as paid, part paid, not paid yet or overdue, and projects with an overdue milestone show "₹X overdue"
 - **Clients**: each client's projects, revenue, profit, contact and notes. A new client can be added on its own or while creating a project
 - **Money**: every payment (money in) and expense (money out, with a category like Domain or Hosting), filterable by type, period and text. Tap any entry to edit or delete it
 - Email and password sign-in, with password reset

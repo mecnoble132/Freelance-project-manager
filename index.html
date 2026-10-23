@@ -173,6 +173,10 @@ textarea{resize:vertical;min-height:90px}
 .msrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,9em);gap:6px;padding:10px;border:1px solid var(--line);border-radius:12px}
 .msrow .msfoot{grid-column:1/-1;display:flex;gap:6px;align-items:center}
 .msrow .msfoot input{flex:1;min-width:0}
+.msrow.rest{border-style:dashed}
+.msrow.rest input[readonly]{background:var(--panel);color:var(--muted)}
+.msrow.none{opacity:.6}
+.msrow .auto-note{grid-column:1/-1}
 .total{font-size:14px;font-weight:600} .total.warn{color:var(--out)}
 .three{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .newbox{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--line);border-radius:10px}
@@ -665,45 +669,63 @@ function openProjectSheet(pre={}){
 }
 
 // Edits a project's whole milestone list: quick splits of the quote, or rows typed by hand. Saving replaces the old list.
+// With a quote, the last row holds the rest of it: it updates as the others are typed, and new rows go in above it.
 function openMilestonesSheet(p){
   const quote=p.quoted||0, old=projMilestones(p);
   const box=h('div',{class:'msrows'}), total=h('div',{class:'total',role:'status'});
-  let rows=[];
+  let rows=[], rest=null;
+  const amountOf = r => Number(r.amt.value)||0;
+  const saved = () => rows.filter(r=>r!==rest || amountOf(r)>0); // a rest of ₹0 isn't saved
   const sync=()=>{
-    const sum=cents(rows.reduce((a,r)=>a+(Number(r.amt.value)||0),0)), off=quote && sum!==cents(quote);
-    total.textContent = !rows.length ? 'No milestones. Saving removes them all.' : 'Total '+rs(sum)+(quote?(off?' — the quote is '+rs(quote):' — matches the quote'):'');
-    total.className='total'+(off&&rows.length?' warn':'');
+    if(rest){
+      const left=cents(quote-rows.filter(r=>r!==rest).reduce((a,r)=>a+amountOf(r),0));
+      rest.amt.value=left>0?left:0;
+      rest.el.classList.toggle('none',left<=0);
+      rest.note.textContent = left>0 ? 'The rest of the quote. It updates as you type the others.' : 'Nothing left: the milestones above cover the quote, so this one won’t be saved.';
+    }
+    const kept=saved();
+    rows.forEach((r,i)=>{ r.name.placeholder=kept.includes(r)?msName(kept.indexOf(r),kept.length):''; r.name.setAttribute('aria-label','Milestone '+(i+1)+' name'); r.amt.setAttribute('aria-label','Milestone '+(i+1)+' amount (₹)'); r.due.setAttribute('aria-label','Milestone '+(i+1)+' due date'); });
+    const keep=saved(), sum=cents(keep.reduce((a,r)=>a+amountOf(r),0)), off=quote && sum!==cents(quote);
+    total.textContent = !keep.length ? 'No milestones. Saving removes them all.'
+      : 'Total '+rs(sum)+(!quote?'':!off?' — matches the quote':sum>quote?' — '+rs(sum-quote)+' more than the '+rs(quote)+' quote':' — the quote is '+rs(quote));
+    total.className='total'+(off&&keep.length?' warn':'');
   };
-  const addRow=(m={})=>{
-    const r={ name:h('input',{placeholder:'e.g. Advance','aria-label':'Milestone '+(rows.length+1)+' name',value:m.name||''}),
-      amt:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Amount (₹)','aria-label':'Milestone '+(rows.length+1)+' amount (₹)',value:m.amount||''}),
-      due:h('input',{type:'date','aria-label':'Milestone '+(rows.length+1)+' due date',value:m.dueDate||''}) };
+  const addRow=(m={},auto)=>{
+    const r={ name:h('input',{value:m.name||''}),
+      amt:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Amount (₹)',value:m.amount||'',readonly:!!auto}),
+      due:h('input',{type:'date',value:m.dueDate||''}) };
     r.amt.addEventListener('input',sync);
-    r.el=h('div',{class:'msrow'},r.name,r.amt,h('div',{class:'msfoot'},r.due,
-      h('button',{class:'btn small ghost',type:'button',onclick:()=>{ rows=rows.filter(x=>x!==r); r.el.remove(); sync(); }},'Remove')));
-    rows.push(r); box.appendChild(r.el);
+    r.note = auto ? h('div',{class:'hint auto-note'}) : null;
+    r.el=h('div',{class:'msrow'+(auto?' rest':'')},r.name,r.amt,r.note,h('div',{class:'msfoot'},r.due,
+      h('button',{class:'btn small ghost',type:'button',onclick:()=>{ rows=rows.filter(x=>x!==r); if(r===rest) rest=null; r.el.remove(); sync(); }},'Remove')));
+    if(rest && !auto){ rows.splice(rows.indexOf(rest),0,r); box.insertBefore(r.el,rest.el); }
+    else { rows.push(r); box.appendChild(r.el); }
+    if(auto) rest=r;
     return r;
   };
-  const reset=()=>{ const dues=rows.map(r=>r.due.value); rows=[]; box.textContent=''; return dues; };
-  // Whole rupees, with the last part taking what's left so the total is exactly the quote (as in writes.js).
-  const split=parts=>{ const dues=reset(); let used=0;
-    parts.forEach((x,i)=>{ const amount=i===parts.length-1?cents(quote-used):Math.round(quote*x/100); used+=amount; addRow({name:msName(i,parts.length),amount,dueDate:dues[i]}); }); sync(); };
-  if(old.length) old.forEach(addRow); else if(quote) split([50,50]); else addRow();
+  const reset=()=>{ const dues=rows.map(r=>r.due.value); rows=[]; rest=null; box.textContent=''; return dues; };
+  // Whole rupees; the last part is the rest, so the total is exactly the quote (as in writes.js).
+  const split=parts=>{ const dues=reset();
+    parts.forEach((x,i)=>{ const last=i===parts.length-1; addRow({name:msName(i,parts.length),amount:last?'':Math.round(quote*x/100),dueDate:dues[i]},last); }); sync(); };
+  const custom=()=>{ const dues=reset(); const first=addRow({name:'Advance',dueDate:dues[0]}); if(quote) addRow({name:'Final payment',dueDate:dues[1]},true); sync(); return first; };
+  // Existing milestones keep their amounts; the last one only becomes the rest when they already add up to the quote.
+  if(old.length){ const fits=quote && cents(old.reduce((a,m)=>a+m.amount,0))===cents(quote); old.forEach((m,i)=>addRow(m,fits&&i===old.length-1)); }
+  else custom();
   sync();
   sheet('Payment milestones',[
     h('p',{class:'muted',style:'margin:0'},p.name+(quote?' · quoted '+rs(quote):' · no quoted price yet')),
     h('div',{class:'splits',role:'group','aria-label':'Quick splits'},
       [['50 / 50',[50,50]],['50 / 30 / 20',[50,30,20]]].map(([l,parts])=>h('button',{class:'btn small',type:'button',disabled:!quote,onclick:()=>split(parts)},l)),
-      h('button',{class:'btn small',type:'button',onclick:()=>{ reset(); addRow().name.focus(); sync(); }},'Custom')),
-    quote?null:h('div',{class:'hint'},'Set a quoted price on the project to use the quick splits.'),
+      h('button',{class:'btn small',type:'button',onclick:()=>custom().amt.focus()},'Custom')),
+    quote?null:h('div',{class:'hint'},'Set a quoted price on the project to use the quick splits and have the last milestone fill in the rest.'),
     box,
-    h('button',{class:'linkbtn',type:'button',onclick:()=>{ addRow().name.focus(); sync(); }},'+ Add milestone'),
+    h('button',{class:'linkbtn',type:'button',onclick:()=>{ const r=addRow(); sync(); r.amt.focus(); }},'+ Add milestone'),
     total
   ], async ()=>{
-    const list=[];
-    for(let i=0;i<rows.length;i++){ const r=rows[i], amount=Number(r.amt.value);
-      if(!(amount>0)) return fail('Milestone '+(i+1)+' needs an amount above ₹0.');
-      list.push({project_id:p.id, name:r.name.value.trim()||msName(i,rows.length), amount, due_date:r.due.value||null, sort_order:i}); }
+    const keep=saved(), list=[];
+    for(let i=0;i<keep.length;i++){ const r=keep[i], amount=amountOf(r);
+      if(!(amount>0)) return fail('Milestone '+(rows.indexOf(r)+1)+' needs an amount above ₹0.');
+      list.push({project_id:p.id, name:r.name.value.trim()||msName(i,keep.length), amount, due_date:r.due.value||null, sort_order:i}); }
     await api.replaceMilestones(old.map(m=>m.id), list);
   }, 'Save milestones', {noFocus:true});
 }

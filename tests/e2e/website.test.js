@@ -254,43 +254,75 @@ test('milestones on the project page: paid, overdue, not paid yet; overdue shows
   assert.match(await card(page, 'Still to collect').textContent(), /₹15,000 overdue/);
 });
 
-test('set milestones with a quick split; warn when they don\'t add up to the quote', async t => {
+const msAmounts = page => page.locator('.sheet .msrow input[type=number]').evaluateAll(els => els.map(e => e.value));
+const msNames = page => page.locator('.sheet .msrow input:not([type])').evaluateAll(els => els.map(e => e.value));
+
+test('the last milestone fills in the rest of the quote as you type, and new milestones go above it', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.eduSite }); // quoted ₹20,000, no milestones yet
+  await page.click('#view button:has-text("Set up milestones")');
+  assert.deepEqual(await msNames(page), ['Advance', 'Final payment']);
+  assert.deepEqual(await msAmounts(page), ['', '20000']);
+  assert.equal(await page.locator('.sheet [aria-label="Milestone 2 amount (₹)"]').getAttribute('readonly'), '');
+  await page.locator('.sheet [aria-label="Milestone 1 amount (₹)"]').pressSequentially('50');
+  assert.deepEqual(await msAmounts(page), ['50', '19950'], 'the rest updates on every keystroke');
+  await page.locator('.sheet [aria-label="Milestone 1 amount (₹)"]').pressSequentially('00');
+  assert.deepEqual(await msAmounts(page), ['5000', '15000']);
+  await page.click('.sheet button:has-text("+ Add milestone")');
+  assert.deepEqual(await msNames(page), ['Advance', '', 'Final payment'], 'the new milestone goes above the rest');
+  assert.deepEqual(await msAmounts(page), ['5000', '', '15000']);
+  await page.fill('.sheet [aria-label="Milestone 2 name"]', 'Design');
+  await page.locator('.sheet [aria-label="Milestone 2 amount (₹)"]').pressSequentially('6000');
+  assert.deepEqual(await msAmounts(page), ['5000', '6000', '9000']);
+  assert.match(await page.locator('.sheet .total').textContent(), /Total ₹20,000 — matches the quote/);
+  await page.fill('.sheet [aria-label="Milestone 3 due date"]', '2026-12-15');
+  await page.click('.sheet button:has-text("Save milestones")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  const saved = (await rows(page, 'milestones')).filter(m => m.project_id === ids.eduSite).sort((a, b) => a.sort_order - b.sort_order);
+  assert.deepEqual(saved.map(m => [m.name, Number(m.amount), m.due_date]), [['Advance', 5000, null], ['Design', 6000, null], ['Final payment', 9000, '2026-12-15']]);
+  // Opening it again: they add up to the quote, so the last one is still the rest.
+  await page.click('#view button:has-text("Edit milestones")');
+  await page.fill('.sheet [aria-label="Milestone 1 amount (₹)"]', '2000');
+  assert.deepEqual(await msAmounts(page), ['2000', '6000', '12000']);
+});
+
+test('quick splits; when the others cover the quote the rest is ₹0 and isn\'t saved', async t => {
   const page = await open(t, { hash: '#/project/' + ids.gbSite });
   await page.click('#view button:has-text("Edit milestones")');
-  const amounts = () => page.locator('.sheet .msrow input[type=number]').evaluateAll(els => els.map(e => e.value));
-  assert.deepEqual(await amounts(), ['20000', '15000', '15000']);
+  assert.deepEqual(await msAmounts(page), ['20000', '15000', '15000']);
   await page.click('.sheet button:has-text("50 / 30 / 20")');
-  assert.deepEqual(await amounts(), ['25000', '15000', '10000']);
-  assert.deepEqual(await page.locator('.sheet .msrow input:not([type])').evaluateAll(els => els.map(e => e.value)), ['Advance', 'Payment 2', 'Final payment']);
+  assert.deepEqual(await msNames(page), ['Advance', 'Payment 2', 'Final payment']);
+  assert.deepEqual(await msAmounts(page), ['25000', '15000', '10000']);
   assert.match(await page.locator('.sheet .total').textContent(), /Total ₹50,000 — matches the quote/);
-  await page.fill('.sheet [aria-label="Milestone 3 amount (₹)"]', '5000');
-  assert.match(await page.locator('.sheet .total').textContent(), /Total ₹45,000 — the quote is ₹50,000/);
-  assert.equal(await page.locator('.sheet .total.warn').count(), 1);
+  await page.fill('.sheet [aria-label="Milestone 1 amount (₹)"]', '40000');
+  await page.fill('.sheet [aria-label="Milestone 2 amount (₹)"]', '15000');
+  assert.deepEqual(await msAmounts(page), ['40000', '15000', '0']);
+  await page.waitForSelector('.sheet .msrow.none:has-text("won’t be saved")');
+  assert.match(await page.locator('.sheet .total.warn').textContent(), /Total ₹55,000 — ₹5,000 more than the ₹50,000 quote/);
   await page.fill('.sheet [aria-label="Milestone 1 due date"]', '2026-11-01');
   await page.click('.sheet button:has-text("Save milestones")');
   await page.waitForSelector('.sheet', { state: 'detached' });
   const saved = (await rows(page, 'milestones')).filter(m => m.project_id === ids.gbSite).sort((a, b) => a.sort_order - b.sort_order);
-  assert.deepEqual(saved.map(m => [m.name, Number(m.amount), m.due_date]), [['Advance', 25000, '2026-11-01'], ['Payment 2', 15000, '2026-10-15'], ['Final payment', 5000, '2026-10-28']]); // a quick split keeps the due dates already set
+  assert.deepEqual(saved.map(m => [m.name, Number(m.amount), m.due_date]), [['Advance', 40000, '2026-11-01'], ['Payment 2', 15000, '2026-10-15']]); // a quick split keeps the due dates already set
   assert.ok(!saved.some(m => m.id === ids.msDesign), 'the old milestones are replaced');
-  await page.waitForSelector('text=The milestones add up to ₹45,000, but the quote is ₹50,000.');
-  assert.match(await card(page, 'Payment milestones').locator('.row').first().textContent(), /₹20,000 of ₹25,000 paid.*Part paid/);
+  await page.waitForSelector('text=The milestones add up to ₹55,000, but the quote is ₹50,000.');
+  // They no longer add up to the quote, so every amount can be typed again.
+  await page.click('#view button:has-text("Edit milestones")');
+  assert.equal(await page.locator('.sheet input[readonly]').count(), 0);
 });
 
 test('custom milestones, refusing an empty amount, then removing them all', async t => {
   const page = await open(t, { hash: '#/project/' + ids.eduSite });
   await page.click('#view button:has-text("Set up milestones")');
-  assert.deepEqual(await page.locator('.sheet .msrow input[type=number]').evaluateAll(els => els.map(e => e.value)), ['10000', '10000']); // 50/50 of the ₹20,000 quote
-  await page.click('.sheet button:has-text("Custom")');
-  await page.fill('.sheet [aria-label="Milestone 1 name"]', 'Everything');
-  await page.click('.sheet button:has-text("+ Add milestone")');
   await page.fill('.sheet [aria-label="Milestone 1 amount (₹)"]', '20000');
+  await page.click('.sheet button:has-text("+ Add milestone")');
   await page.click('.sheet button:has-text("Save milestones")');
   await page.waitForSelector('text=Milestone 2 needs an amount above ₹0.');
   assert.equal((await rows(page, 'milestones')).filter(m => m.project_id === ids.eduSite).length, 0);
   await page.click('.sheet .msrow:nth-child(2) button:has-text("Remove")');
+  await page.fill('.sheet [aria-label="Milestone 1 name"]', 'Everything');
   await page.click('.sheet button:has-text("Save milestones")');
   await page.waitForSelector('.sheet', { state: 'detached' });
-  assert.match(await card(page, 'Payment milestones').textContent(), /Everything.*₹20,000.*Paid/); // ₹20,000 received
+  assert.match(await card(page, 'Payment milestones').textContent(), /Everything.*₹20,000.*Paid/); // ₹20,000 received; the ₹0 rest isn't saved
   await page.click('#view button:has-text("Edit milestones")');
   await page.click('.sheet .msrow button:has-text("Remove")');
   assert.match(await page.locator('.sheet .total').textContent(), /Saving removes them all/);
@@ -299,11 +331,28 @@ test('custom milestones, refusing an empty amount, then removing them all', asyn
   assert.equal((await rows(page, 'milestones')).filter(m => m.project_id === ids.eduSite).length, 0);
 });
 
+test('without a quote, every amount is typed by hand', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.eduSite });
+  await page.click('#view .page-head button:has-text("Edit")');
+  await page.fill('#p-quoted', '');
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  await page.click('#view button:has-text("Set up milestones")');
+  assert.deepEqual(await msAmounts(page), ['']);
+  assert.equal(await page.locator('.sheet input[readonly]').count(), 0);
+  assert.equal(await page.locator('.sheet button:has-text("50 / 50")').isDisabled(), true);
+  await page.fill('.sheet [aria-label="Milestone 1 amount (₹)"]', '7000');
+  await page.click('.sheet button:has-text("+ Add milestone")');
+  assert.deepEqual(await msAmounts(page), ['7000', '']);
+  assert.match(await page.locator('.sheet .total').textContent(), /^Total ₹7,000$/);
+});
+
 test('the site still works before the milestones table exists', async t => {
   const page = await open(t, { hash: '#/project/' + ids.gbSite, missing: ['milestones'] });
   await card(page, 'Payment milestones').waitFor();
   assert.equal(await kpi(page, 'Still to collect').textContent(), '₹30,000');
   await page.click('#view button:has-text("Set up milestones")');
+  await page.fill('.sheet [aria-label="Milestone 1 amount (₹)"]', '20000');
   await page.click('.sheet button:has-text("Save milestones")');
   await page.waitForSelector('text=Run supabase/schema.sql');
 });
