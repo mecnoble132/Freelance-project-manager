@@ -653,6 +653,128 @@ test('the site still works before the services table exists', async t => {
   await page.waitForSelector('text=No services yet.');
 });
 
+// ---------- tasks and time ----------
+const taskRows = async page => { await card(page, 'Tasks').locator('.row').first().waitFor(); return card(page, 'Tasks').locator('.row .title').allTextContents(); };
+
+test('a project shows its tasks, hours and what it earns per hour', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  assert.deepEqual(await taskRows(page), ['Send design for approval', 'Set up hosting', 'Write launch email', 'Buy the domain']); // open by due date, done last
+  assert.match(await card(page, 'Tasks').textContent(), /3 open · 1 done/);
+  await card(page, 'Time').locator('.row').first().waitFor();
+  assert.match(await card(page, 'Tasks').textContent(), /Overdue · 20 Oct 2026/);
+  assert.equal(await card(page, 'Tasks').locator('.task-check').nth(3).isChecked(), true);
+  assert.match(await kpi(page, 'Earned per hour').textContent(), /₹3,077/); // 20,000 over 6h 30m
+  assert.match(await card(page, 'Time').textContent(), /6h 30m · ₹3,077 an hour/);
+  assert.deepEqual(await card(page, 'Time').locator('.row .title').allTextContents(), ['Revisions', 'Homepage design']); // newest first
+  const edu = await open(t, { hash: '#/project/' + ids.eduSite });
+  assert.equal(await kpi(edu, 'Earned per hour').count(), 0); // no time logged, so no number
+  await edu.waitForSelector('text=Log the hours you spend');
+  await edu.waitForSelector('text=A checklist for this project');
+});
+
+test('add, tick off, edit and delete a task', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await page.click('#view button:has-text("+ Add task")');
+  await page.click('.sheet button:has-text("Add task")');
+  await page.waitForSelector('text=Type what needs doing.');
+  await page.fill('#t-title', 'Collect client logo');
+  await page.fill('#t-due', '2026-10-25');
+  await page.click('.sheet button:has-text("Add task")');
+  await page.waitForSelector('.row:has-text("Collect client logo")');
+  assert.deepEqual(await taskRows(page), ['Send design for approval', 'Collect client logo', 'Set up hosting', 'Write launch email', 'Buy the domain']);
+  const row = () => rows(page, 'tasks').then(r => r.find(x => x.title === 'Collect client logo'));
+  assert.deepEqual([(await row()).project_id, (await row()).due_date, (await row()).done], [ids.gbSite, '2026-10-25', false]);
+  await page.click('input[aria-label="Mark done: Collect client logo"]');
+  assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), 'Reopen: Collect client logo'); // keyboard focus stays on the task
+  await page.waitForSelector('input[aria-label="Reopen: Collect client logo"]:checked');
+  assert.ok((await row()).done && (await row()).done_at);
+  assert.deepEqual(await taskRows(page), ['Send design for approval', 'Set up hosting', 'Write launch email', 'Collect client logo', 'Buy the domain']); // done tasks move to the end, latest first
+  assert.match(await card(page, 'Tasks').textContent(), /3 open · 2 done/);
+  await page.click('input[aria-label="Reopen: Collect client logo"]');
+  await page.waitForSelector('input[aria-label="Mark done: Collect client logo"]:not(:checked)');
+  assert.deepEqual([(await row()).done, (await row()).done_at], [false, null]);
+  await page.click('button[aria-label="Edit task Collect client logo"]');
+  await page.fill('#t-title', 'Collect the logo files');
+  await page.fill('#t-due', '');
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.row:has-text("Collect the logo files")');
+  assert.equal((await rows(page, 'tasks')).find(x => x.title === 'Collect the logo files').due_date, null);
+  await page.click('button[aria-label="Edit task Collect the logo files"]');
+  await page.click('.sheet button:has-text("Delete task")');
+  await page.click('.sheet button.danger');
+  await page.waitForSelector('.row:has-text("Collect the logo files")', { state: 'detached' });
+  assert.equal((await rows(page, 'tasks')).some(x => x.title === 'Collect the logo files'), false);
+});
+
+test('log, edit and delete time: the hours and earned per hour follow', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await page.click('#view button:has-text("Log time")');
+  await page.click('.sheet button:has-text("Log time")');
+  await page.waitForSelector('text=Type the time spent');
+  await page.fill('#tm-spent', 'a while');
+  await page.click('.sheet button:has-text("Log time")');
+  await page.waitForSelector('text=Type the time spent');
+  await page.fill('#tm-spent', '30h');
+  await page.click('.sheet button:has-text("Log time")');
+  await page.waitForSelector('text=at most 24 hours');
+  await page.fill('#tm-spent', '1h 30m');
+  await page.fill('#tm-note', 'Mobile fixes');
+  await page.click('.sheet button:has-text("Log time")');
+  await page.waitForSelector('.row:has-text("Mobile fixes")');
+  const e = (await rows(page, 'time_entries')).find(x => x.note === 'Mobile fixes');
+  assert.deepEqual([e.project_id, e.minutes, e.date], [ids.gbSite, 90, '2026-10-23']);
+  assert.match(await card(page, 'Time').textContent(), /8h · ₹2,500 an hour/); // 20,000 over 8 hours
+  assert.match(await kpi(page, 'Earned per hour').textContent(), /₹2,500/);
+  await page.click('button[aria-label="Edit 1h 30m on 23 Oct 2026"]');
+  await page.fill('#tm-spent', '2.5'); // a plain number is hours
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.row:has-text("Mobile fixes"):has-text("2h 30m")');
+  assert.equal((await rows(page, 'time_entries')).find(x => x.note === 'Mobile fixes').minutes, 150);
+  await page.click('button[aria-label="Edit 2h 30m on 23 Oct 2026"]');
+  await page.click('.sheet button:has-text("Delete time")');
+  await page.click('.sheet button.danger');
+  await page.waitForSelector('.row:has-text("Mobile fixes")', { state: 'detached' });
+  assert.match(await card(page, 'Time').textContent(), /6h 30m · ₹3,077 an hour/);
+});
+
+test('the dashboard lists overdue tasks and tasks due this week, and ticking one removes it', async t => {
+  const page = await open(t);
+  const due = card(page, 'Tasks due soon');
+  await due.waitFor();
+  assert.deepEqual(await due.locator('.row .title').allTextContents(), ['Send design for approval', 'Set up hosting']); // not the undated one, the done one or the other user's
+  assert.match(await due.textContent(), /Overdue · 20 Oct 2026/);
+  assert.match(await due.locator('.row').first().textContent(), /Website · GeekBoz/);
+  await due.locator('.row').first().click();
+  await heading(page).filter({ hasText: 'Website' }).waitFor();
+  await page.click('input[aria-label="Mark done: Send design for approval"]');
+  await page.waitForSelector('input[aria-label="Reopen: Send design for approval"]:checked');
+  await page.click('#tabs a:has-text("Dashboard")');
+  await card(page, 'Tasks due soon').waitFor();
+  assert.deepEqual(await card(page, 'Tasks due soon').locator('.row .title').allTextContents(), ['Set up hosting']);
+});
+
+test('deleting a project says its tasks and time go too', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await page.click('#view button:has-text("Edit")');
+  await page.click('.sheet button:has-text("Delete project")');
+  assert.match(await page.locator('.sheet').textContent(), /Its 4 tasks are deleted\. Its 2 time entries are deleted\./);
+  await page.click('.sheet button.danger');
+  await heading(page).filter({ hasText: 'Projects' }).waitFor();
+  assert.equal((await rows(page, 'tasks')).filter(x => x.project_id === ids.gbSite).length, 0); // the fake database cascades like the real one
+  assert.equal((await rows(page, 'time_entries')).filter(x => x.project_id === ids.gbSite).length, 0);
+});
+
+test('the site still works before the tasks and time tables exist', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite, missing: ['tasks', 'time_entries'] });
+  await card(page, 'Tasks').waitFor();
+  await page.waitForSelector('text=A checklist for this project');
+  await page.waitForSelector('text=Log the hours you spend');
+  assert.equal(await kpi(page, 'Earned per hour').count(), 0);
+  await page.goto(SITE + '#/');
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await card(page, 'Tasks due soon').count(), 0);
+});
+
 // ---------- boards ----------
 const column = (page, label) => page.locator('.board .bcol[aria-label="' + label + '"]');
 const cardTitles = (page, label) => column(page, label).locator('.bcard .title').allTextContents();
@@ -804,7 +926,7 @@ for (const colorScheme of ['light', 'dark']) {
     const ms = await page.locator('.sheet').boundingBox();
     assert.ok(ms.x >= 0 && ms.x + ms.width <= 375, 'the milestones sheet is wider than the phone');
     assert.ok(await page.locator('.sheet').evaluate(el => el.scrollWidth <= el.clientWidth), 'the milestones sheet scrolls sideways');
-    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoices', 'Your details'], ['#/invoice/' + ids.invDesign, 'Remind'], ['#/renewals', '+ Add service'], ['#/renewals', 'Renew']]) {
+    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoices', 'Your details'], ['#/invoice/' + ids.invDesign, 'Remind'], ['#/renewals', '+ Add service'], ['#/renewals', 'Renew'], ['#/project/' + ids.gbSite, '+ Add task'], ['#/project/' + ids.gbSite, 'Log time']]) {
       await page.keyboard.press('Escape');
       await page.goto(SITE + hash);
       await page.click('#view button:has-text("' + button + '")');

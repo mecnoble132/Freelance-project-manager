@@ -72,13 +72,15 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sept', 
 const niceDate = d => Number(d.slice(8, 10)) + ' ' + MONTHS[Number(d.slice(5, 7)) - 1] + ' ' + d.slice(0, 4);
 
 async function load(db) {
-  const [clients, projects, txns, milestones, invoices, settings, services] = await Promise.all(['clients', 'projects', 'txns', 'milestones', 'invoices', 'settings', 'services'].map(t => db.select(t)));
-  return new Ledger(clients, projects, txns, milestones, invoices, settings, services);
+  const [clients, projects, txns, milestones, invoices, settings, services, tasks, time_entries] = await Promise.all(['clients', 'projects', 'txns', 'milestones', 'invoices', 'settings', 'services', 'tasks', 'time_entries'].map(t => db.select(t)));
+  return new Ledger(clients, projects, txns, milestones, invoices, settings, services, tasks, time_entries);
 }
 
 class Ledger {
-  constructor(clients, projects, txns, milestones = [], invoices = [], settings = [], services = []) {
-    this.raw = { clients, projects, txns, milestones, invoices, settings, services };
+  constructor(clients, projects, txns, milestones = [], invoices = [], settings = [], services = [], tasks = [], timeEntries = []) {
+    this.raw = { clients, projects, txns, milestones, invoices, settings, services, tasks, time_entries: timeEntries };
+    this.tasks = tasks.map(r => ({ id: r.id, projectId: r.project_id, title: r.title || '', done: !!r.done, dueDate: r.due_date || null, order: r.sort_order ?? 0, doneAt: r.done_at || null, createdAt: r.created_at || '' }));
+    this.timeEntries = timeEntries.map(r => ({ id: r.id, projectId: r.project_id, date: r.date || null, minutes: Number(r.minutes) || 0, note: r.note || '' }));
     this.services = services.map(r => ({ id: r.id, clientId: r.client_id, projectId: r.project_id || null, kind: r.kind || 'other', name: r.name || '', provider: r.provider || '',
       cost: Number(r.cost) || 0, price: Number(r.price) || 0, cycle: r.cycle || 'yearly', nextRenewal: r.next_renewal, autoRenew: !!r.auto_renew, active: r.active !== false, notes: r.notes || '' }));
     this.clients = clients.map(r => ({ id: r.id, name: r.name, contact: r.contact || '', notes: r.notes || '', order: r.sort_order ?? 0 }));
@@ -182,8 +184,74 @@ class Ledger {
       links: { preview: p.previewUrl || null, live: p.liveUrl || null, github: p.githubUrl || null },
       startDate: p.startDate, dueDate: p.dueDate, overdue: !!(p.dueDate && p.status !== 'done' && p.dueDate < todayIST()),
       money: { ...this.projectStats(p), ...(ms.length ? { overdue: round(ms.reduce((a, m) => a + (m.state === 'overdue' ? m.left : 0), 0)) } : {}) },
-      ...(ms.length ? { milestones: ms } : {})
+      ...(ms.length ? { milestones: ms } : {}),
+      ...this.workSummary(p)
     };
+  }
+
+  // ---------- tasks and time ----------
+  // Open tasks first (by due date, then the order they were added), done ones after, latest first.
+  taskOrder(a, b) {
+    return (a.done - b.done) || (a.done ? (b.doneAt || '').localeCompare(a.doneAt || '') : (a.dueDate || '9999').localeCompare(b.dueDate || '9999') || a.order - b.order || a.createdAt.localeCompare(b.createdAt));
+  }
+  projectTasks(p) { return this.tasks.filter(t => t.projectId === p.id).sort((a, b) => this.taskOrder(a, b)); }
+  // Hours logged and what the project earned per hour. Earned per hour only exists once time is logged.
+  projectTime(p) {
+    const minutes = this.timeEntries.filter(e => e.projectId === p.id).reduce((a, e) => a + e.minutes, 0);
+    const hours = round(minutes / 60), received = sumOf(this.txns.filter(t => t.projectId === p.id)).revenue;
+    return { minutes, hours, earnedPerHour: minutes > 0 ? round(received / (minutes / 60)) : null };
+  }
+  taskSummary(t) {
+    const p = this.project(t.projectId), today = todayIST();
+    return { id: t.id, title: t.title, project: p ? this.projectLabel(p) : 'Deleted project', done: t.done, dueDate: t.dueDate, overdue: !t.done && !!t.dueDate && t.dueDate < today, doneAt: t.doneAt || undefined };
+  }
+  timeSummary(e) {
+    const p = this.project(e.projectId);
+    return { id: e.id, date: e.date, minutes: e.minutes, hours: round(e.minutes / 60), project: p ? this.projectLabel(p) : 'Deleted project', note: e.note || null };
+  }
+  workSummary(p) {
+    const ts = this.projectTasks(p), tm = this.projectTime(p), out = {};
+    if (ts.length) out.tasks = { open: ts.filter(t => !t.done).length, done: ts.filter(t => t.done).length, overdue: ts.filter(t => this.taskSummary(t).overdue).length };
+    if (tm.minutes) out.time = tm;
+    return out;
+  }
+  // Open tasks that are overdue or due in the next 7 days, across every project.
+  taskAlerts() {
+    const t = todayIST(), soon = addDays(t, 7), open = this.tasks.filter(x => !x.done && x.dueDate && this.project(x.projectId));
+    const by = (a, b) => a.dueDate.localeCompare(b.dueDate);
+    return { overdue: open.filter(x => x.dueDate < t).sort(by).map(x => this.taskSummary(x)), dueWithinAWeek: open.filter(x => x.dueDate >= t && x.dueDate <= soon).sort(by).map(x => this.taskSummary(x)) };
+  }
+  listTasks({ project, client, status = 'open' } = {}) {
+    let pool = this.tasks, label;
+    if (project) { const r = this.resolveProject(project, client); if (r.error) return r; pool = pool.filter(t => t.projectId === r.project.id); label = this.projectLabel(r.project); }
+    else if (client) { const r = this.resolveClient(client); if (r.error) return r; const ids = new Set(this.projects.filter(p => p.clientId === r.client.id).map(p => p.id)); pool = pool.filter(t => ids.has(t.projectId)); }
+    const f = String(status).toLowerCase();
+    const keep = { open: t => !t.done, done: t => t.done, overdue: t => !t.done && this.taskSummary(t).overdue, all: () => true }[f];
+    if (!keep) return { error: 'status must be one of: open, overdue, done, all.' };
+    const list = pool.filter(keep).sort((a, b) => this.taskOrder(a, b));
+    return { today: todayIST(), project: label, status: f, count: list.length, tasks: list.map(t => this.taskSummary(t)) };
+  }
+  listTime({ project, client, period = 'all_time', from, to } = {}) {
+    const r = periodRange(period, from, to);
+    let pool = this.timeEntries.filter(e => inRange(e, r)), label;
+    if (project) { const x = this.resolveProject(project, client); if (x.error) return x; pool = pool.filter(e => e.projectId === x.project.id); label = this.projectLabel(x.project); }
+    else if (client) { const x = this.resolveClient(client); if (x.error) return x; const ids = new Set(this.projects.filter(p => p.clientId === x.client.id).map(p => p.id)); pool = pool.filter(e => ids.has(e.projectId)); }
+    pool = pool.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const minutes = pool.reduce((a, e) => a + e.minutes, 0);
+    const byProject = {};
+    pool.forEach(e => { const k = this.projectLabel(this.project(e.projectId) || { title: 'Deleted project', clientId: null }); byProject[k] = (byProject[k] || 0) + e.minutes; });
+    return { period: r.label, project: label, count: pool.length, totalMinutes: minutes, totalHours: round(minutes / 60),
+      byProject: Object.entries(byProject).map(([project, m]) => ({ project, hours: round(m / 60) })).sort((a, b) => b.hours - a.hours), entries: pool.slice(0, 200).map(e => this.timeSummary(e)),
+      truncated: pool.length > 200 ? 'Showing the newest 200 of ' + pool.length + '.' : undefined };
+  }
+  // By id, or by title within a project (or any project when none is given).
+  resolveTask(query, projectQuery, clientQuery) {
+    let pool = this.tasks;
+    if (projectQuery) { const r = this.resolveProject(projectQuery, clientQuery); if (r.error) return r; pool = pool.filter(t => t.projectId === r.project.id); }
+    const ms = this.find(pool, query, t => t.title);
+    if (ms.length === 1) return { task: ms[0] };
+    if (!ms.length) return { error: 'No task matches "' + query + '".', tasks: pool.filter(t => !t.done).slice(0, 30).map(t => t.title) };
+    return { error: 'Several tasks match "' + query + '". Pass the project or the id.', matches: ms.map(t => ({ id: t.id, title: t.title, project: (this.project(t.projectId) || {}).title })) };
   }
 
   txnSummary(t) {
@@ -344,6 +412,7 @@ class Ledger {
       overdueProjects: open.filter(p => p.dueDate && p.dueDate < t).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate, status: STATUS_LABELS[p.status] })),
       dueWithinAWeek: open.filter(p => p.dueDate && p.dueDate >= t && p.dueDate <= soon).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate })),
       overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
+      overdueTasks: this.taskAlerts().overdue, tasksDueWithinAWeek: this.taskAlerts().dueWithinAWeek,
       stillToCollect: this.owed().map(o => ({ ...o, lastPayment: lastPaid(this.project(o.projectId)) })),
       overdueInvoices: this.invoices.map(i => this.invoiceSummary(i)).filter(x => x.state === 'overdue').sort((a, b) => b.daysOverdue - a.daysOverdue),
       openLeads: this.projects.filter(p => p.status === 'lead').map(p => ({ id: p.id, project: this.projectLabel(p), quoted: p.quoted, added: (p.createdAt || '').slice(0, 10) })),
@@ -383,7 +452,9 @@ class Ledger {
     if (r.error) return r;
     const p = r.project;
     const tx = this.txns.filter(t => t.projectId === p.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    return { currency: 'INR', ...this.projectSummary(p), transactions: tx.map(t => this.txnSummary(t)) };
+    const ts = this.projectTasks(p), te = this.timeEntries.filter(e => e.projectId === p.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    return { currency: 'INR', ...this.projectSummary(p), transactions: tx.map(t => this.txnSummary(t)),
+      ...(ts.length ? { taskList: ts.map(t => this.taskSummary(t)) } : {}), ...(te.length ? { timeEntries: te.map(e => this.timeSummary(e)) } : {}) };
   }
 
   listClients() {

@@ -8,8 +8,8 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 | B | Payment milestones | Released |
 | C | Invoices (UPI QR) and chasing payments, without GST or TDS for now | Released |
 | D | Renewals and retainers | Released |
-| E | Leads and quotes | Not started |
-| F | Tasks and time | Not started |
+| E | Leads and quotes | Skipped for now (the owner is managing closed deals, not leads) |
+| F | Tasks and time | Built, waiting for `schema.sql` on the live database |
 
 One pull request per phase, in this order: each builds on the one before.
 
@@ -169,6 +169,8 @@ The automated tests are already done (`tests/`). This phase is the financial yea
 - **Check**: lost projects owe nothing and show up in the filters; accept a quote, then undo it.
 
 ### F. Tasks and time
+
+> **As built (Oct 2026):** the website has a Tasks card (checkbox, due date, edit and delete) and a Time card (type `1h 30m`, `45m`, `1.5h` or `1:30`; a plain number is hours) on each project, an "Earned per hour" tile once time is logged, and a "Tasks due soon" card on the dashboard (overdue or due in 7 days). Done tasks sit below open ones, latest first. `log_time` takes minutes or hours; there is no tool to delete a time entry (use `undo_change`, or the website). Deleting a project or client removes their tasks and time through the change log, so undo brings them back.
 
 - **DB**:
   - `tasks`: `project_id` (cascade), `title`, `done`, `due_date`, `sort_order`, `done_at`.

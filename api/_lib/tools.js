@@ -200,6 +200,33 @@ const TOOLS = [
       log_expense: { type: 'boolean', description: 'Defaults to true (when it has a cost).' }, create_invoice: { type: 'boolean', description: 'Defaults to true (when it has a price).' }, confirm }, ['service']),
     run: W.renewService },
 
+  // ---------- tasks and time ----------
+  { name: 'list_tasks', title: 'List tasks', annotations: RO,
+    description: 'Tasks (the checklist on a project) with their project, due date and whether they are done or overdue. Defaults to open tasks across every project. Filter by project, client or status.',
+    inputSchema: obj({ ...projectRef, status: { type: 'string', enum: ['open', 'overdue', 'done', 'all'], description: 'Defaults to open.' } }),
+    run: read((l, a) => l.listTasks(a)) },
+  { name: 'list_time', title: 'List time logged', annotations: RO,
+    description: 'Hours logged on projects, newest first, with the total and hours per project. Filter by project, client or period. For a project\'s earned-per-hour, use get_project.',
+    inputSchema: obj({ ...projectRef, period, from: day('Start date, inclusive'), to: day('End date, inclusive') }),
+    run: read((l, a) => l.listTime(a)) },
+  { name: 'add_task', title: 'Add tasks to a project', annotations: WRITE,
+    description: 'Adds one or more tasks to a project\'s checklist in one change. Each task has a title and an optional due date.',
+    inputSchema: obj({ ...projectRef, tasks: { type: 'array', minItems: 1, maxItems: 50, description: 'Tasks to add, e.g. [{"title": "Design homepage"}, {"title": "Launch", "due_date": "2026-11-15"}].',
+      items: obj({ title: str('What needs doing.'), due_date: day('Due date') }, ['title']) } }, ['project', 'tasks']),
+    run: W.addTasks },
+  { name: 'update_task', title: 'Edit or complete a task', annotations: EDIT,
+    description: 'Ticks a task off (done: true) or reopens it (done: false), or changes its title or due date. Only the fields given are changed.',
+    inputSchema: obj({ task: str('Task title or id.'), ...projectRef, title: str('New title.'), done: { type: 'boolean' }, due_date: str('Due date (YYYY-MM-DD). Empty string clears it.') }, ['task']),
+    run: W.updateTask },
+  { name: 'delete_task', title: 'Delete a task', annotations: DELETE,
+    description: 'Deletes a task. First call without confirm to see which task it is.',
+    inputSchema: obj({ task: str('Task title or id.'), ...projectRef, confirm }, ['task']), run: W.deleteTask },
+  { name: 'log_time', title: 'Log time on a project', annotations: WRITE,
+    description: 'Logs time worked on a project: give minutes or hours (not both), a date (defaults to today) and an optional note. The project then shows its total hours and what it earned per hour.',
+    inputSchema: obj({ ...projectRef, minutes: { type: 'integer', minimum: 1, maximum: 1440 }, hours: { type: 'number', exclusiveMinimum: 0, maximum: 24, description: 'Instead of minutes, e.g. 1.5.' },
+      date: day('Day the work was done. Defaults to today (India time)'), note: str('What was done.') }, ['project']),
+    run: W.logTime },
+
   // ---------- undo ----------
   { name: 'undo_change', title: 'Undo a change', annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     description: 'Reverts one change made through this connection: the latest one by default, or the one with the given change_id. A change made by one tool call is undone as a whole.',
@@ -211,6 +238,7 @@ Reading: "still to collect" is quoted price minus money received, for projects t
 The financial year runs April to March (FY 2026–27 is 2026-04-01 to 2027-03-31). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
 Invoices: numbered like INV/2026-27/001 per financial year, never deleted (cancel instead). A payment linked to an invoice (add_payment with invoice) counts towards it; an invoice is paid when those reach its total, and overdue when past its due date and not paid. No tax (GST or TDS) is used yet. To chase money, use list_overdue and draft_payment_reminder, write the message yourself for the user to send, then log_reminder once they have sent it. This server never sends messages.
 Renewals: services (domains, hosting, SSL, maintenance, email) renew on a monthly, quarterly or yearly cycle with a cost (what the user pays) and a price (what the client pays). renew_service logs the cost, invoices the price and moves the date in one change; it is two-step like deletes.
+Tasks and time: each project has a checklist of tasks (title, optional due date, done or not) and logged time (minutes, a date, a note). A project's earned per hour is the money received divided by the hours logged, and only exists once time is logged. Never store client passwords in tasks or notes.
 Changing data:
 - Before creating or changing anything, make sure you have the details right. If the user's message was vague, sum up what you're about to save and ask first.
 - Several projects can share a title (many are called "Website"), so name the client too.
