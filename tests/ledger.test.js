@@ -118,6 +118,42 @@ test('attention items', async t => {
   assert.deepEqual([early.overdueProjects.length, early.dueWithinAWeek.map(p => p.dueDate)], [0, ['2026-10-20']]);
 });
 
+test('milestones are covered in order by the project\'s money in', async t => {
+  const { db, store } = setup(t);
+  let L = await load(db);
+  const states = name => L.getProject({ project: name }).milestones.map(m => [m.name, m.state, m.paid, m.left]);
+  // 20,000 received covers the advance exactly; Design is past due; Launch is due next week.
+  assert.deepEqual(states('GeekBoz Website'), [['Advance', 'paid', 20000, 0], ['Design', 'overdue', 0, 15000], ['Launch', 'unpaid', 0, 15000]]);
+  assert.equal(L.getProject({ project: 'GeekBoz Website' }).milestones[1].daysOverdue, 8);
+  assert.deepEqual(states('App'), [['Advance', 'unpaid', 0, 40000]]); // a lead's milestones are never overdue
+  assert.equal(L.getProject({ project: 'Edustudy Website' }).milestones, undefined);
+  // A payment covering part of milestone 2: still overdue, now part paid.
+  store.insert('txns', { client_id: ids.geekboz, project_id: ids.gbSite, type: 'in', amount: 5000, date: '2026-10-22' }, OWNER);
+  L = await load(db);
+  assert.deepEqual(states('GeekBoz Website'), [['Advance', 'paid', 20000, 0], ['Design', 'overdue', 5000, 10000], ['Launch', 'unpaid', 0, 15000]]);
+  assert.equal(L.getProject({ project: 'GeekBoz Website' }).money.overdue, 10000);
+  // Before its due date, the same milestone is just part paid.
+  t.mock.timers.setTime(Date.parse('2026-10-10T06:30:00Z'));
+  L = await load(db);
+  assert.deepEqual(states('GeekBoz Website')[1], ['Design', 'part-paid', 5000, 10000]);
+  // Its due date itself isn't overdue yet.
+  t.mock.timers.setTime(Date.parse('2026-10-15T06:30:00Z'));
+  L = await load(db);
+  assert.equal(states('GeekBoz Website')[1][1], 'part-paid');
+});
+
+test('overdue and soon-due milestones in attention items and the summary', async t => {
+  const { db } = setup(t);
+  const L = await load(db);
+  const a = L.attention();
+  assert.deepEqual(a.overdueMilestones.map(m => [m.project, m.milestone, m.left, m.dueDate, m.daysOverdue]), [['Website (GeekBoz)', 'Design', 15000, '2026-10-15', 8]]);
+  assert.deepEqual(a.milestonesDueWithinAWeek.map(m => [m.milestone, m.dueDate]), [['Launch', '2026-10-28']]);
+  const s = L.summary();
+  assert.equal(s.overdueFromMilestones, 15000);
+  assert.deepEqual([s.overdueMilestones.length, s.milestonesDueWithinAWeek.length], [1, 1]);
+  assert.equal(L.listProjects({ client: 'GeekBoz' }).projects[0].money.overdue, 15000);
+});
+
 test('finding clients and projects by name', async t => {
   const { db } = setup(t);
   const L = await load(db);
@@ -138,7 +174,7 @@ test('project, client and money lists', async t => {
   const { db } = setup(t);
   const L = await load(db);
   const gb = L.getProject({ project: 'GeekBoz Website' });
-  assert.deepEqual(gb.money, { quoted: 50000, received: 20000, spent: 1000, profit: 19000, stillToCollect: 30000, percentPaid: 40 });
+  assert.deepEqual(gb.money, { quoted: 50000, received: 20000, spent: 1000, profit: 19000, stillToCollect: 30000, percentPaid: 40, overdue: 15000 });
   assert.equal(gb.overdue, true);
   assert.equal(gb.transactions.length, 2);
   assert.equal(L.getProject({ project: 'App' }).money.stillToCollect, 0); // leads aren't owed anything

@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers/setup');
-const { ids, OTHER } = require('./helpers/seed');
+const { ids, OWNER, OTHER } = require('./helpers/seed');
 const { TOOLS } = require('../api/_lib/tools');
 const { Invalid } = require('../api/_lib/writes');
 
@@ -56,6 +56,7 @@ test('delete a client: preview first, then everything goes, and undo brings it a
   assert.deepEqual(ctx.store.snapshot(), before);
   await changeAndUndo(t, ctx, 'delete_client', { client: 'Edustudy', confirm: true }, () => {
     assert.equal(rows(ctx.store, 'projects').filter(p => p.client_id === ids.edustudy).length, 0);
+    assert.ok(!rows(ctx.store, 'milestones').some(m => m.id === ids.msLead));
     assert.equal(rows(ctx.store, 'txns').filter(x => x.client_id === ids.edustudy).length, 0);
   });
 });
@@ -102,13 +103,73 @@ test('edit a project, including moving it to another client with its money', asy
 test('delete a project keeps its money under "No project" unless asked', async t => {
   const ctx = setup(t);
   const preview = await call(ctx.db, 'delete_project', { project: 'GeekBoz Website' });
-  assert.equal(preview.confirmation_required, true);
+  assert.deepEqual([preview.confirmation_required, preview.milestones], [true, 3]);
   await changeAndUndo(t, ctx, 'delete_project', { project: 'GeekBoz Website', confirm: true }, () => {
     assert.deepEqual(rows(ctx.store, 'txns').filter(x => [ids.advance, ids.domain].includes(x.id)).map(x => x.project_id), [null, null]);
+    assert.equal(rows(ctx.store, 'milestones').filter(m => m.project_id === ids.gbSite).length, 0); // undo brings them back
   });
   await changeAndUndo(t, ctx, 'delete_project', { project: 'GeekBoz Website', delete_transactions: true, confirm: true }, () => {
     assert.ok(!rows(ctx.store, 'txns').some(x => x.id === ids.advance));
   });
+});
+
+test('set milestones from a split: whole rupees, the last part takes the rest, one undo restores the old list', async t => {
+  const ctx = setup(t);
+  const ms = () => rows(ctx.store, 'milestones').filter(m => m.project_id === ids.gbSite).sort((a, b) => a.sort_order - b.sort_order);
+  await changeAndUndo(t, ctx, 'set_milestones', { project: 'GeekBoz Website', split: [50, 30, 20], due_dates: ['2026-10-01', '2026-11-15'] }, r => {
+    assert.deepEqual(ms().map(m => [m.name, Number(m.amount), m.due_date, m.sort_order]),
+      [['Advance', 25000, '2026-10-01', 0], ['Payment 2', 15000, '2026-11-15', 1], ['Final payment', 10000, null, 2]]);
+    assert.ok(!ctx.store.rows.milestones.some(m => m.id === ids.msDesign), 'the old list is replaced');
+    // 20,000 received covers part of the advance, which is past due.
+    assert.deepEqual(r.milestones.map(m => [m.state, m.paid, m.left]), [['overdue', 20000, 5000], ['unpaid', 0, 15000], ['unpaid', 0, 10000]]);
+    assert.equal(r.warning, undefined);
+  });
+  await changeAndUndo(t, ctx, 'set_milestones', { project: 'GeekBoz Website', split: [33.33, 33.33, 33.34] }, () => {
+    assert.deepEqual(ms().map(m => Number(m.amount)), [16665, 16665, 16670]);
+  });
+  await changeAndUndo(t, ctx, 'set_milestones', { project: 'GeekBoz Website', split: [100] }, () => {
+    assert.deepEqual(ms().map(m => [m.name, Number(m.amount)]), [['Full payment', 50000]]);
+  });
+});
+
+test('set milestones from a list, warn when they don\'t add up to the quote, and remove them all', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'set_milestones', { project: 'Website', client: 'GeekBoz', milestones: [{ name: 'Advance', amount: 10000 }, { amount: '₹20,000', due_date: '2026-12-01' }] }, r => {
+    assert.deepEqual(r.milestones.map(m => [m.name, m.amount, m.dueDate, m.state]), [['Advance', 10000, null, 'paid'], ['Final payment', 20000, '2026-12-01', 'part-paid']]);
+    assert.match(r.warning, /add up to ₹30,000, but the quote is ₹50,000/);
+  });
+  await changeAndUndo(t, ctx, 'set_milestones', { project: 'GeekBoz Website', milestones: [] }, r => {
+    assert.match(r.message, /Removed the milestones/);
+    assert.equal(rows(ctx.store, 'milestones').filter(m => m.project_id === ids.gbSite).length, 0);
+  });
+  assert.match((await call(ctx.db, 'set_milestones', { project: 'Edustudy Website', milestones: [] })).error, /no milestones to remove/);
+});
+
+test('set milestones refuses bad input and changes nothing', async t => {
+  const ctx = setup(t);
+  const before = ctx.store.snapshot();
+  const set = a => call(ctx.db, 'set_milestones', { project: 'GeekBoz Website', ...a });
+  await assert.rejects(set({}), /either a split/);
+  await assert.rejects(set({ split: [50, 50], milestones: [] }), /either a split/);
+  await assert.rejects(set({ split: [50, 40] }), /add up to 100/);
+  await assert.rejects(set({ split: [50, -10, 60] }), /above 0/);
+  await assert.rejects(set({ split: [50, 50], due_dates: ['2026-02-30'] }), /real date/);
+  await assert.rejects(set({ milestones: [{ name: 'Advance', amount: 0 }] }), /above 0/);
+  ctx.store.insert('projects', { client_id: ids.geekboz, name: 'Free site', quoted: 0 }, OWNER);
+  const after = ctx.store.snapshot();
+  await assert.rejects(call(ctx.db, 'set_milestones', { project: 'Free site', split: [50, 50] }), /no quoted price/);
+  assert.deepEqual(ctx.store.snapshot(), after);
+  assert.notDeepEqual(after, before);
+});
+
+test('undoing a new project is refused once milestones were set on it', async t => {
+  const ctx = setup(t);
+  const made = await call(ctx.db, 'create_project', { title: 'Shop', client: 'GeekBoz', quoted: 10000 });
+  const set = await call(ctx.db, 'set_milestones', { project: 'GeekBoz Shop', split: [50, 50] });
+  assert.match((await call(ctx.db, 'undo_change', { change_id: made.change_id })).error, /newer item/);
+  assert.equal((await call(ctx.db, 'undo_change', { change_id: set.change_id })).done, true);
+  assert.equal((await call(ctx.db, 'undo_change', { change_id: made.change_id })).done, true);
+  assert.ok(!rows(ctx.store, 'projects').some(p => p.name === 'Shop'));
 });
 
 test('log payments and expenses', async t => {

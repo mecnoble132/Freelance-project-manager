@@ -46,7 +46,7 @@ const TOOLS = [
       a_from: day('Current period start'), a_to: day('Current period end'), b_from: day('Previous period start'), b_to: day('Previous period end') }),
     run: read((l, a) => l.comparePeriods(a)) },
   { name: 'get_attention_items', title: 'What needs attention', annotations: RO,
-    description: 'Overdue projects, projects due within a week, money still to collect (with the last payment date), open leads, projects on hold, and missing information like projects without a quoted price.',
+    description: 'Overdue projects, projects due within a week, overdue and soon-due payment milestones, money still to collect (with the last payment date), open leads, projects on hold, and missing information like projects without a quoted price.',
     inputSchema: obj({}), run: read(l => l.attention()) },
   { name: 'search', title: 'Search everything', annotations: RO,
     description: 'Finds clients, projects and money entries whose names, notes, descriptions, contacts or links contain the text.',
@@ -56,7 +56,7 @@ const TOOLS = [
     inputSchema: obj({ status: { type: 'string', enum: ['lead', 'active', 'paused', 'done', 'open'], description: 'open = anything not done.' }, client: str('Client name, or part of it.'), search: str('Text in the title, client or description.') }),
     run: read((l, a) => l.listProjects(a)) },
   { name: 'get_project', title: 'Project details', annotations: RO,
-    description: 'Everything about one project, including every payment and expense on it (with their ids).',
+    description: 'Everything about one project, including its payment milestones (paid, part-paid, overdue or unpaid) and every payment and expense on it (with their ids).',
     inputSchema: obj(projectRef, ['project']), run: read((l, a) => l.getProject(a)) },
   { name: 'list_clients', title: 'List clients', annotations: RO,
     description: 'Every client with id, number of projects, revenue, spending, profit and money still to collect.',
@@ -100,6 +100,14 @@ const TOOLS = [
   { name: 'delete_project', title: 'Delete a project', annotations: DELETE,
     description: 'Deletes a project. Its money entries stay with the client under "No project", unless delete_transactions is true. First call without confirm to see what would be deleted.',
     inputSchema: obj({ ...projectRef, delete_transactions: { type: 'boolean' }, confirm }, ['project']), run: W.deleteProject },
+  { name: 'set_milestones', title: 'Set payment milestones', annotations: EDIT,
+    description: 'Replaces a project\'s payment milestones (the stages its price is paid in) with a new list, in one change. Give a split of the quoted price in percent, like [50, 50] or [50, 30, 20], or a list of milestones with amounts. An empty list removes them all. The project\'s payments cover the milestones in order.',
+    inputSchema: obj({ ...projectRef,
+      split: { type: 'array', items: { type: 'number', exclusiveMinimum: 0 }, description: 'Percentages of the quoted price that add up to 100, e.g. [50, 30, 20]. Named Advance, Payment 2, ..., Final payment.' },
+      due_dates: { type: 'array', items: { type: 'string' }, description: 'With split: due dates (YYYY-MM-DD) for each part, in order. Optional.' },
+      milestones: { type: 'array', items: obj({ name: str('e.g. "Advance", "Design approved", "Launch".'), amount: { type: 'number', minimum: 0.01, description: 'Amount in rupees.' }, due_date: day('Due date') }, ['amount']),
+        description: 'Instead of split: the milestones in the order they are paid.' } }, ['project']),
+    run: W.setMilestones },
 
   // ---------- money ----------
   { name: 'add_payment', title: 'Log a payment received', annotations: WRITE,
@@ -130,7 +138,7 @@ const TOOLS = [
 ];
 
 const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense. All money is in Indian rupees (INR); dates are YYYY-MM-DD in India time.
-Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. Some older entries have no date; they only count under all_time.
+Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. A project's price can be split into payment milestones; its money received covers them in order, so each is paid, part-paid, unpaid or overdue (past its due date and not fully paid). Some older entries have no date; they only count under all_time.
 The financial year runs April to March (FY 2026–27 is 2026-04-01 to 2027-03-31). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
 Changing data:
 - Before creating or changing anything, make sure you have the details right. If the user's message was vague, sum up what you're about to save and ask first.

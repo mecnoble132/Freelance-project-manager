@@ -26,7 +26,7 @@ test.before(async () => { browser = await chromium.launch(); });
 test.after(async () => { if (browser) await browser.close(); });
 
 // Opens the site on a fresh page. Returns the page and the list of browser errors seen.
-async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30' } = {}) {
+async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30', missing = [] } = {}) {
   const context = await browser.newContext({ viewport, colorScheme, timezoneId: 'Asia/Kolkata', locale: 'en-IN' });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -35,6 +35,7 @@ async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280,
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   await page.clock.setFixedTime(new Date(now));
   const store = seed(new Store(parse()));
+  missing.forEach(table => delete store.rows[table]); // as if supabase/schema.sql hadn't been re-run yet
   await page.addInitScript(init => {
     window.__LEDGER_TEST__ = init;
     if (init.period) localStorage.setItem('ledger.period', init.period);
@@ -225,10 +226,86 @@ test('edit a project, then delete it (its money stays with the client)', async t
   await page.click('#view button:has-text("Edit")');
   await page.click('.sheet button:has-text("Delete project")');
   await page.waitForSelector('text=Its 2 money entries stay with GeekBoz');
+  await page.waitForSelector('text=Its 3 milestones are deleted.');
   await page.click('.sheet button.danger');
   await heading(page).filter({ hasText: 'Projects' }).waitFor();
   const tx = (await rows(page, 'txns')).filter(x => [ids.advance, ids.domain].includes(x.id));
   assert.deepEqual(tx.map(x => x.project_id), [null, null]);
+});
+
+const card = (page, title) => page.locator('.card').filter({ has: page.locator('h2', { hasText: title }) });
+
+test('milestones on the project page: paid, overdue, not paid yet; overdue shows on the cards', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  const ms = card(page, 'Payment milestones');
+  await ms.waitFor();
+  const list = await ms.locator('.row').allTextContents();
+  assert.equal(list.length, 3);
+  assert.match(list[0], /Advance.*Due 1 Sept 2026.*₹20,000.*Paid/);
+  assert.match(list[1], /Design.*Due 15 Oct 2026.*₹15,000.*Overdue/);
+  assert.match(list[2], /Launch.*Due 28 Oct 2026.*₹15,000.*Not paid yet/);
+  assert.match(await kpi(page, 'Still to collect').locator('xpath=..').textContent(), /₹15,000 overdue/);
+  await page.goto(SITE + '#/projects');
+  await page.click('.pills button:has-text("All")');
+  const cardOf = name => page.locator('.pcard').filter({ has: page.locator('h3', { hasText: new RegExp('^' + name + '$') }) });
+  assert.match(await cardOf('Website').first().textContent(), /₹15,000 overdue/);
+  assert.doesNotMatch(await cardOf('App').textContent(), /overdue/); // a lead is never overdue
+  await page.goto(SITE + '#/');
+  assert.match(await card(page, 'Still to collect').textContent(), /₹15,000 overdue/);
+});
+
+test('set milestones with a quick split; warn when they don\'t add up to the quote', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  await page.click('#view button:has-text("Edit milestones")');
+  const amounts = () => page.locator('.sheet .msrow input[type=number]').evaluateAll(els => els.map(e => e.value));
+  assert.deepEqual(await amounts(), ['20000', '15000', '15000']);
+  await page.click('.sheet button:has-text("50 / 30 / 20")');
+  assert.deepEqual(await amounts(), ['25000', '15000', '10000']);
+  assert.deepEqual(await page.locator('.sheet .msrow input:not([type])').evaluateAll(els => els.map(e => e.value)), ['Advance', 'Payment 2', 'Final payment']);
+  assert.match(await page.locator('.sheet .total').textContent(), /Total ₹50,000 — matches the quote/);
+  await page.fill('.sheet [aria-label="Milestone 3 amount (₹)"]', '5000');
+  assert.match(await page.locator('.sheet .total').textContent(), /Total ₹45,000 — the quote is ₹50,000/);
+  assert.equal(await page.locator('.sheet .total.warn').count(), 1);
+  await page.fill('.sheet [aria-label="Milestone 1 due date"]', '2026-11-01');
+  await page.click('.sheet button:has-text("Save milestones")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  const saved = (await rows(page, 'milestones')).filter(m => m.project_id === ids.gbSite).sort((a, b) => a.sort_order - b.sort_order);
+  assert.deepEqual(saved.map(m => [m.name, Number(m.amount), m.due_date]), [['Advance', 25000, '2026-11-01'], ['Payment 2', 15000, '2026-10-15'], ['Final payment', 5000, '2026-10-28']]); // a quick split keeps the due dates already set
+  assert.ok(!saved.some(m => m.id === ids.msDesign), 'the old milestones are replaced');
+  await page.waitForSelector('text=The milestones add up to ₹45,000, but the quote is ₹50,000.');
+  assert.match(await card(page, 'Payment milestones').locator('.row').first().textContent(), /₹20,000 of ₹25,000 paid.*Part paid/);
+});
+
+test('custom milestones, refusing an empty amount, then removing them all', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.eduSite });
+  await page.click('#view button:has-text("Set up milestones")');
+  assert.deepEqual(await page.locator('.sheet .msrow input[type=number]').evaluateAll(els => els.map(e => e.value)), ['10000', '10000']); // 50/50 of the ₹20,000 quote
+  await page.click('.sheet button:has-text("Custom")');
+  await page.fill('.sheet [aria-label="Milestone 1 name"]', 'Everything');
+  await page.click('.sheet button:has-text("+ Add milestone")');
+  await page.fill('.sheet [aria-label="Milestone 1 amount (₹)"]', '20000');
+  await page.click('.sheet button:has-text("Save milestones")');
+  await page.waitForSelector('text=Milestone 2 needs an amount above ₹0.');
+  assert.equal((await rows(page, 'milestones')).filter(m => m.project_id === ids.eduSite).length, 0);
+  await page.click('.sheet .msrow:nth-child(2) button:has-text("Remove")');
+  await page.click('.sheet button:has-text("Save milestones")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.match(await card(page, 'Payment milestones').textContent(), /Everything.*₹20,000.*Paid/); // ₹20,000 received
+  await page.click('#view button:has-text("Edit milestones")');
+  await page.click('.sheet .msrow button:has-text("Remove")');
+  assert.match(await page.locator('.sheet .total').textContent(), /Saving removes them all/);
+  await page.click('.sheet button:has-text("Save milestones")');
+  await page.waitForSelector('#view button:has-text("Set up milestones")');
+  assert.equal((await rows(page, 'milestones')).filter(m => m.project_id === ids.eduSite).length, 0);
+});
+
+test('the site still works before the milestones table exists', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite, missing: ['milestones'] });
+  await card(page, 'Payment milestones').waitFor();
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '₹30,000');
+  await page.click('#view button:has-text("Set up milestones")');
+  await page.click('.sheet button:has-text("Save milestones")');
+  await page.waitForSelector('text=Run supabase/schema.sql');
 });
 
 test('projects: filters and search', async t => {
@@ -297,5 +374,11 @@ for (const colorScheme of ['light', 'dark']) {
     await page.click('#view button:has-text("+ Add money")');
     const box = await page.locator('.sheet').boundingBox();
     assert.ok(box.x >= 0 && box.x + box.width <= 375, 'the add-money sheet is wider than the phone');
+    await page.keyboard.press('Escape');
+    await page.goto(SITE + '#/project/' + ids.gbSite);
+    await page.click('#view button:has-text("Edit milestones")');
+    const ms = await page.locator('.sheet').boundingBox();
+    assert.ok(ms.x >= 0 && ms.x + ms.width <= 375, 'the milestones sheet is wider than the phone');
+    assert.ok(await page.locator('.sheet').evaluate(el => el.scrollWidth <= el.clientWidth), 'the milestones sheet scrolls sideways');
   });
 }

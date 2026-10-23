@@ -1,7 +1,7 @@
 // Changes made through the MCP server. Each tool call is one "change": every row it inserts, updates or deletes
 // is recorded in activity_log under one batch id, so the whole call can be listed and undone.
 const crypto = require('crypto');
-const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory } = require('./ledger');
+const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory, round } = require('./ledger');
 
 class Invalid extends Error {}
 const fail = msg => { throw new Invalid(msg); };
@@ -107,10 +107,12 @@ async function deleteClient(db, a) {
   const r = L.resolveClient(a.client); if (r.error) return r;
   const c = L.raw.clients.find(x => x.id === r.client.id);
   const projects = L.raw.projects.filter(p => p.client_id === c.id), txns = L.raw.txns.filter(t => t.client_id === c.id);
+  const milestones = L.raw.milestones.filter(m => projects.some(p => p.id === m.project_id));
   if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length,
     moneyIn: txns.filter(t => t.type !== 'out').reduce((s, t) => s + Number(t.amount), 0), moneyOut: txns.filter(t => t.type === 'out').reduce((s, t) => s + Number(t.amount), 0) });
   const ch = new Change(db, 'Deleted client ' + c.name + ' with ' + projects.length + ' projects and ' + txns.length + ' entries'); await ch.ready();
   for (const t of txns) await ch.remove('txns', t);
+  for (const m of milestones) await ch.remove('milestones', m);
   for (const p of projects) await ch.remove('projects', p);
   await ch.remove('clients', c);
   return done('Deleted ' + c.name + ', their ' + projects.length + ' projects and ' + txns.length + ' money entries.', {}, await ch.commit());
@@ -164,7 +166,7 @@ async function updateProject(db, a) {
     for (const t of L.raw.txns.filter(t => t.project_id === before.id)) await ch.update('txns', t, { client_id: patch.client_id });
   }
   const p = await ch.update('projects', before, patch);
-  const now = new Ledger(L.raw.clients, L.raw.projects.map(x => x.id === p.id ? p : x), L.raw.txns);
+  const now = new Ledger(L.raw.clients, L.raw.projects.map(x => x.id === p.id ? p : x), L.raw.txns, L.raw.milestones);
   return done('Updated "' + p.name + '" (' + Object.keys(patch).map(k => ({ name: 'title', client_id: 'client' })[k] || k).join(', ') + ').', { project: now.projectSummary(now.project(p.id)) }, await ch.commit());
 }
 
@@ -172,11 +174,13 @@ async function deleteProject(db, a) {
   const L = await load(db);
   const r = L.resolveProject(a.project, a.client); if (r.error) return r;
   const p = L.raw.projects.find(x => x.id === r.project.id), txns = L.raw.txns.filter(t => t.project_id === p.id);
+  const milestones = L.raw.milestones.filter(m => m.project_id === p.id);
   const label = p.name + ' (' + L.clientName(p.client_id) + ')';
-  if (a.confirm !== true) return confirmFirst('deleted', { project: label, transactions: txns.length,
+  if (a.confirm !== true) return confirmFirst('deleted', { project: label, transactions: txns.length, milestones: milestones.length,
     whatHappensToMoney: txns.length ? (a.delete_transactions ? 'Its ' + txns.length + ' money entries will be deleted too.' : 'Its ' + txns.length + ' money entries stay with the client under "No project". Pass delete_transactions: true to delete them instead.') : 'It has no money entries.' });
   const ch = new Change(db, 'Deleted project ' + label); await ch.ready();
   for (const t of txns) { if (a.delete_transactions) await ch.remove('txns', t); else await ch.update('txns', t, { project_id: null }); }
+  for (const m of milestones) await ch.remove('milestones', m);
   await ch.remove('projects', p);
   return done('Deleted ' + label + (txns.length ? (a.delete_transactions ? ' and its ' + txns.length + ' money entries.' : '. Its ' + txns.length + ' money entries are now under "No project".') : '.'), {}, await ch.commit());
 }
@@ -253,6 +257,46 @@ async function deleteTransactions(db, a) {
   return done('Deleted ' + rows.length + ' money ' + (rows.length === 1 ? 'entry.' : 'entries.'), {}, await ch.commit());
 }
 
+// ---------- milestones ----------
+const milestoneName = (i, n) => n === 1 ? 'Full payment' : i === 0 ? 'Advance' : i === n - 1 ? 'Final payment' : 'Payment ' + (i + 1);
+
+// Replaces a project's whole milestone list in one change, from a percentage split of the quote or from a list.
+async function setMilestones(db, a) {
+  const L = await load(db);
+  const r = L.resolveProject(a.project, a.client); if (r.error) return r;
+  const p = L.raw.projects.find(x => x.id === r.project.id), quoted = Number(p.quoted) || 0, label = L.projectLabel(r.project);
+  if (given(a.split) === given(a.milestones)) fail('Give either a split like [50, 30, 20] or a list of milestones (an empty list removes them all).');
+  let list;
+  if (given(a.split)) {
+    if (!Array.isArray(a.split) || !a.split.length) fail('The split must be a list of percentages, like [50, 30, 20].');
+    if (!quoted) fail(label + ' has no quoted price, so it can\'t be split. Set the quote first, or give milestones with amounts.');
+    const parts = a.split.map(Number);
+    if (parts.some(x => !(x > 0))) fail('Each part of the split must be a percentage above 0.');
+    if (Math.abs(parts.reduce((x, y) => x + y, 0) - 100) > 0.01) fail('The split must add up to 100, like [50, 30, 20].');
+    const dues = Array.isArray(a.due_dates) ? a.due_dates : [];
+    let used = 0;
+    // Whole rupees, with the last part taking what's left so the total is exactly the quote.
+    list = parts.map((x, i) => { const amount = i === parts.length - 1 ? round(quoted - used) : Math.round(quoted * x / 100); used += amount;
+      return { name: milestoneName(i, parts.length), amount, due_date: dues[i] ? date(dues[i], 'Due date ' + (i + 1)) : null }; });
+  } else {
+    if (!Array.isArray(a.milestones)) fail('milestones must be a list.');
+    list = a.milestones.map((m, i, all) => ({ name: text(m && m.name, 200) || milestoneName(i, all.length),
+      amount: money(m && m.amount, { label: 'Milestone ' + (i + 1) + ' amount' }), due_date: m && m.due_date ? date(m.due_date, 'Milestone ' + (i + 1) + ' due date') : null }));
+  }
+  if (list.length > 24) fail('Use at most 24 milestones.');
+  if (list.some(m => !(m.amount > 0))) fail('The quote is too small to split that way.');
+  const old = L.raw.milestones.filter(m => m.project_id === p.id);
+  if (!list.length && !old.length) return { error: label + ' has no milestones to remove.' };
+  const total = round(list.reduce((x, m) => x + m.amount, 0));
+  const ch = new Change(db, (list.length ? 'Set ' + list.length + ' milestones on ' : 'Removed the milestones from ') + label); await ch.ready();
+  for (const m of old) await ch.remove('milestones', m);
+  const rows = list.length ? await ch.insert('milestones', list.map((m, i) => ({ project_id: p.id, name: m.name, amount: m.amount, due_date: m.due_date, sort_order: i }))) : [];
+  const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones.filter(m => m.project_id !== p.id).concat(rows));
+  return done(list.length ? 'Set ' + list.length + ' milestones on ' + label + ', totalling ₹' + total.toLocaleString('en-IN') + '.' : 'Removed the milestones from ' + label + '.',
+    { project: label, milestones: now.milestones(now.project(p.id)),
+      warning: list.length && quoted && total !== quoted ? 'The milestones add up to ₹' + total.toLocaleString('en-IN') + ', but the quote is ₹' + quoted.toLocaleString('en-IN') + '. Tell the user.' : undefined }, await ch.commit());
+}
+
 // ---------- history and undo ----------
 async function listChanges(db, a) {
   const rows = await db.select('activity_log');
@@ -279,11 +323,11 @@ async function undoChange(db, a) {
   // Undoing an insert deletes the row; refuse if something added later depends on it.
   for (const e of entries.filter(e => e.op === 'insert')) {
     const deps = e.table_name === 'clients' ? [...L.raw.projects.filter(p => p.client_id === e.row_id), ...L.raw.txns.filter(t => t.client_id === e.row_id)]
-      : e.table_name === 'projects' ? L.raw.txns.filter(t => t.project_id === e.row_id) : [];
+      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id)] : [];
     const later = deps.filter(d => !insertedHere.has(d.id));
     if (later.length) return { error: 'Can\'t undo "' + e.summary + '": ' + later.length + ' newer item(s) were added to what it created. Undo or move those first.' };
   }
-  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns };
+  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones };
   const skipped = [];
   for (const e of entries) {
     const exists = current[e.table_name].some(r => r.id === e.row_id);
@@ -295,4 +339,4 @@ async function undoChange(db, a) {
   return { done: true, message: 'Undid: ' + entries[0].summary + '.', change_id: batch, skipped: skipped.length ? skipped : undefined };
 }
 
-module.exports = { createClient, updateClient, deleteClient, createProject, updateProject, deleteProject, addTransactions, updateTransaction, deleteTransactions, listChanges, undoChange, Invalid };
+module.exports = { createClient, updateClient, deleteClient, createProject, updateProject, deleteProject, setMilestones, addTransactions, updateTransaction, deleteTransactions, listChanges, undoChange, Invalid };

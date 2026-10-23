@@ -165,6 +165,15 @@ textarea{resize:vertical;min-height:90px}
 .seg button[aria-pressed="true"].in{background:var(--in);color:#fff}
 .seg button[aria-pressed="true"].out{background:var(--out);color:#fff}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.state{font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--bg);color:var(--muted);white-space:nowrap}
+.state.paid{color:var(--in)} .state.overdue{background:var(--out);color:#fff}
+.overdue-note{font-size:13px;font-weight:600;color:var(--out)}
+.splits{display:flex;gap:6px;flex-wrap:wrap}
+.msrows{display:flex;flex-direction:column;gap:10px}
+.msrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,9em);gap:6px;padding:10px;border:1px solid var(--line);border-radius:12px}
+.msrow .msfoot{grid-column:1/-1;display:flex;gap:6px;align-items:center}
+.msrow .msfoot input{flex:1;min-width:0}
+.total{font-size:14px;font-weight:600} .total.warn{color:var(--out)}
 .three{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .newbox{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--line);border-radius:10px}
 .foot{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
@@ -189,7 +198,7 @@ textarea{resize:vertical;min-height:90px}
 <script src="config.js"></script>
 <script>
 (function(){
-const S = { clients:[], projects:[], txns:[], view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
+const S = { clients:[], projects:[], txns:[], milestones:[], view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
   period:pref('period','this_fy'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
@@ -228,8 +237,21 @@ const sortTx = arr => arr.slice().sort((a,b)=> (b.date||'').localeCompare(a.date
 const sortClients = arr => arr.slice().sort((a,b)=>(a.order??1e9)-(b.order??1e9) || (a.createdAt||0)-(b.createdAt||0));
 const STATUS_ORDER = {active:0,lead:1,paused:2,done:3};
 const sortProjects = arr => arr.slice().sort((a,b)=>(STATUS_ORDER[a.status]??9)-(STATUS_ORDER[b.status]??9) || (b.createdAt||0)-(a.createdAt||0));
-// What a project has brought in, cost, and is still owed. Leads aren't owed anything yet.
-function projStats(p){ const s=sumOf(S.txns.filter(t=>t.projectId===p.id)); return {...s, quoted:p.quoted||0, due: p.status==='lead' ? 0 : Math.max(0,(p.quoted||0)-s.earned)}; }
+// What a project has brought in, cost, is still owed, and is overdue on its milestones. Leads aren't owed anything yet.
+function projStats(p){ const s=sumOf(S.txns.filter(t=>t.projectId===p.id)); return {...s, quoted:p.quoted||0, due: p.status==='lead' ? 0 : Math.max(0,(p.quoted||0)-s.earned),
+  overdue: projMilestones(p).reduce((a,m)=>a+(m.state==='overdue'?m.left:0),0)}; }
+// The project's money in pays off its milestones in order. One is overdue when its due date has passed and it isn't fully paid. Same rules as ledger.js.
+const cents = n => Math.round(n*100)/100;
+function projMilestones(p){
+  let left=sumOf(S.txns.filter(t=>t.projectId===p.id)).earned; const t=today();
+  return S.milestones.filter(m=>m.projectId===p.id).sort((a,b)=>a.order-b.order||a.createdAt-b.createdAt).map(m=>{
+    const paid=cents(Math.min(m.amount,left)); left=cents(left-paid); const owing=cents(m.amount-paid);
+    const overdue=owing>0 && p.status!=='lead' && !!m.dueDate && m.dueDate<t;
+    return {...m, paid, left:owing, state:!owing?'paid':overdue?'overdue':paid?'part-paid':'unpaid'};
+  });
+}
+const MS_STATES = {paid:'Paid','part-paid':'Part paid',overdue:'Overdue',unpaid:'Not paid yet'};
+const msName = (i,n) => n===1 ? 'Full payment' : i===0 ? 'Advance' : i===n-1 ? 'Final payment' : 'Payment '+(i+1);
 
 // ---------- routing ----------
 function parseHash(){ const parts=location.hash.replace(/^#\/?/,'').split('/'); const n=parts[0]||'home';
@@ -331,7 +353,7 @@ function renderHome(v){
   const owedCard = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Still to collect'),h('span',{class:'num sub'},rs(owed))));
   if(!owedList.length) owedCard.appendChild(h('div',{class:'empty'},'Nothing owed. Set a quoted price on a project to track what’s left to collect.'));
   else owedCard.appendChild(h('div',{class:'list'},owedList.map(s=>h('a',{class:'row',href:hrefOf({name:'project',id:s.p.id})},
-    h('div',{class:'grow'},h('div',{class:'title'},s.p.name),h('div',{class:'sub'},clientName(s.p.clientId)+' · '+rs(s.earned)+' of '+rs(s.quoted)+' paid')),
+    h('div',{class:'grow'},h('div',{class:'title'},s.p.name),h('div',{class:'sub'},clientName(s.p.clientId)+' · '+rs(s.earned)+' of '+rs(s.quoted)+' paid'),s.overdue?h('div',{class:'overdue-note'},rs(s.overdue)+' overdue'):null),
     h('span',{class:'num'},rs(s.due))))));
 
   const byCat = {}; tx.filter(t=>t.type==='out').forEach(t=>{ const c=t.category||'Other'; byCat[c]=(byCat[c]||0)+t.amount; });
@@ -420,6 +442,7 @@ function projectCard(p){
     s.quoted ? h('div',null,
       h('div',{class:'sub',style:'margin-bottom:4px'},rs(s.earned)+' of '+rs(s.quoted)+' paid'+(s.due?' · '+rs(s.due)+' left':'')),
       h('div',{class:'progress',role:'img','aria-label':Math.round(pct)+'% paid'},h('span',{style:'width:'+pct+'%'}))) : null,
+    s.overdue ? h('div',{class:'overdue-note'},rs(s.overdue)+' overdue') : null,
     h('div',{class:'mini'},
       h('div',null,h('span',{class:'l'},'Received'),h('span',{class:'num'},rs(s.earned))),
       h('div',null,h('span',{class:'l'},'Spent'),h('span',{class:'num'},rs(s.spent))),
@@ -465,7 +488,7 @@ function renderProject(v,id){
       kpi('Received', rs(s.earned), s.quoted?Math.round(Math.min(100,s.earned/s.quoted*100))+'% of quote':'Money in','in'),
       kpi('Spent', rs(s.spent), 'Money out','out'),
       kpi('Profit', signed(s.profit), s.earned>0?Math.round(s.profit/s.earned*100)+'% margin':'Received − spent', s.profit<0?'out':''),
-      kpi('Still to collect', rs(s.due), p.status==='lead'?'Lead — not owed yet':'Quoted − received')));
+      kpi('Still to collect', rs(s.due), p.status==='lead'?'Lead — not owed yet':s.overdue?rs(s.overdue)+' overdue':'Quoted − received')));
   const links = h('div',{class:'links'},LINKS.map(([k,l,ic,lower])=>p[k]?linkEl(p[k],l+' · '+shortUrl(p[k]),ic):h('span',{class:'link none'},icon(ic),'No '+lower+' link')));
   const about = h('div',{class:'card'},h('h2',null,'About'),
     p.description?h('p',{class:'prose'},p.description):h('p',{class:'muted',style:'margin:0'},'No description yet.'+(canWrite()?' Use Edit to add one.':'')),
@@ -477,7 +500,19 @@ function renderProject(v,id){
   const money = h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Money'),h('span',{class:'sub'},tx.length+(tx.length===1?' entry':' entries'))));
   if(!tx.length) money.appendChild(h('div',{class:'empty'},'No money logged for this project yet.'));
   else money.appendChild(h('div',{class:'list'},tx.map(t=>txRow(t,false))));
-  v.appendChild(h('div',{class:'cols'},about,money));
+  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},about,milestonesCard(p)),money));
+}
+function milestonesCard(p){
+  const ms=projMilestones(p), total=ms.reduce((a,m)=>a+m.amount,0);
+  const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Payment milestones'),
+    canWrite()?h('button',{class:'btn small',type:'button',onclick:()=>openMilestonesSheet(p)},ms.length?'Edit milestones':'Set up milestones'):null));
+  if(!ms.length){ card.appendChild(h('div',{class:'empty'},'Split the price into stages, like 50% upfront and 50% at launch, to see what’s paid and what’s overdue.')); return card; }
+  card.appendChild(h('div',{class:'list'},ms.map(m=>h('div',{class:'row'},
+    h('div',{class:'grow'},h('div',{class:'title'},m.name||'Milestone'),
+      h('div',{class:'sub'},[m.dueDate?'Due '+fmtDate(m.dueDate):'No due date', m.state==='part-paid'||m.state==='overdue'&&m.paid?rs(m.paid)+' of '+rs(m.amount)+' paid':null].filter(Boolean).join(' · '))),
+    h('div',{class:'right'},h('span',{class:'num'},rs(m.amount)),h('span',{class:'state '+m.state},MS_STATES[m.state]))))));
+  if(p.quoted && cents(total)!==cents(p.quoted)) card.appendChild(h('div',{class:'hint'},'The milestones add up to '+rs(total)+', but the quote is '+rs(p.quoted)+'.'));
+  return card;
 }
 
 // ---------- clients ----------
@@ -555,8 +590,8 @@ function renderMoney(v){
 
 function toastErr(e){
   console.warn(e);
-  const missingCol = e && (e.code==='PGRST204' || /column/i.test(e.message||''));
-  const m = missingCol ? 'The database is missing the new project fields. Run supabase/schema.sql in the Supabase SQL editor, then try again.' : 'Couldn’t save that. Check your connection and try again.';
+  const missingCol = e && (e.code==='PGRST204' || e.code==='PGRST205' || /column|table/i.test(e.message||''));
+  const m = missingCol ? 'The database is missing new tables or fields. Run supabase/schema.sql in the Supabase SQL editor, then try again.' : 'Couldn’t save that. Check your connection and try again.';
   const r=$('#sheet-err'); if(r) r.textContent=m;
 }
 
@@ -624,9 +659,53 @@ function openProjectSheet(pre={}){
     if(editing){ await api.update('projects',p.id,row); }
     else { const id=await api.insert('projects',row); go({name:'project',id}); }
   }, editing?'Save changes':'Add project', editing?{onDelete:()=>{
-    const n=S.txns.filter(t=>t.projectId===p.id).length;
-    confirmSheet('Delete '+p.name+'?', n ? 'Its '+n+(n===1?' money entry stays':' money entries stay')+' with '+clientName(p.clientId)+', under “No project”.' : 'This can’t be undone.', 'Delete project', async()=>{ await api.del('projects',p.id); go({name:'projects'}); });
+    const n=S.txns.filter(t=>t.projectId===p.id).length, nm=S.milestones.filter(m=>m.projectId===p.id).length;
+    confirmSheet('Delete '+p.name+'?', (n ? 'Its '+n+(n===1?' money entry stays':' money entries stay')+' with '+clientName(p.clientId)+', under “No project”.' : 'This can’t be undone.')+(nm?' Its '+nm+(nm===1?' milestone is':' milestones are')+' deleted.':''), 'Delete project', async()=>{ await api.del('projects',p.id); go({name:'projects'}); });
   }, deleteLabel:'Delete project'}:{});
+}
+
+// Edits a project's whole milestone list: quick splits of the quote, or rows typed by hand. Saving replaces the old list.
+function openMilestonesSheet(p){
+  const quote=p.quoted||0, old=projMilestones(p);
+  const box=h('div',{class:'msrows'}), total=h('div',{class:'total',role:'status'});
+  let rows=[];
+  const sync=()=>{
+    const sum=cents(rows.reduce((a,r)=>a+(Number(r.amt.value)||0),0)), off=quote && sum!==cents(quote);
+    total.textContent = !rows.length ? 'No milestones. Saving removes them all.' : 'Total '+rs(sum)+(quote?(off?' — the quote is '+rs(quote):' — matches the quote'):'');
+    total.className='total'+(off&&rows.length?' warn':'');
+  };
+  const addRow=(m={})=>{
+    const r={ name:h('input',{placeholder:'e.g. Advance','aria-label':'Milestone '+(rows.length+1)+' name',value:m.name||''}),
+      amt:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Amount (₹)','aria-label':'Milestone '+(rows.length+1)+' amount (₹)',value:m.amount||''}),
+      due:h('input',{type:'date','aria-label':'Milestone '+(rows.length+1)+' due date',value:m.dueDate||''}) };
+    r.amt.addEventListener('input',sync);
+    r.el=h('div',{class:'msrow'},r.name,r.amt,h('div',{class:'msfoot'},r.due,
+      h('button',{class:'btn small ghost',type:'button',onclick:()=>{ rows=rows.filter(x=>x!==r); r.el.remove(); sync(); }},'Remove')));
+    rows.push(r); box.appendChild(r.el);
+    return r;
+  };
+  const reset=()=>{ const dues=rows.map(r=>r.due.value); rows=[]; box.textContent=''; return dues; };
+  // Whole rupees, with the last part taking what's left so the total is exactly the quote (as in writes.js).
+  const split=parts=>{ const dues=reset(); let used=0;
+    parts.forEach((x,i)=>{ const amount=i===parts.length-1?cents(quote-used):Math.round(quote*x/100); used+=amount; addRow({name:msName(i,parts.length),amount,dueDate:dues[i]}); }); sync(); };
+  if(old.length) old.forEach(addRow); else if(quote) split([50,50]); else addRow();
+  sync();
+  sheet('Payment milestones',[
+    h('p',{class:'muted',style:'margin:0'},p.name+(quote?' · quoted '+rs(quote):' · no quoted price yet')),
+    h('div',{class:'splits',role:'group','aria-label':'Quick splits'},
+      [['50 / 50',[50,50]],['50 / 30 / 20',[50,30,20]]].map(([l,parts])=>h('button',{class:'btn small',type:'button',disabled:!quote,onclick:()=>split(parts)},l)),
+      h('button',{class:'btn small',type:'button',onclick:()=>{ reset(); addRow().name.focus(); sync(); }},'Custom')),
+    quote?null:h('div',{class:'hint'},'Set a quoted price on the project to use the quick splits.'),
+    box,
+    h('button',{class:'linkbtn',type:'button',onclick:()=>{ addRow().name.focus(); sync(); }},'+ Add milestone'),
+    total
+  ], async ()=>{
+    const list=[];
+    for(let i=0;i<rows.length;i++){ const r=rows[i], amount=Number(r.amt.value);
+      if(!(amount>0)) return fail('Milestone '+(i+1)+' needs an amount above ₹0.');
+      list.push({project_id:p.id, name:r.name.value.trim()||msName(i,rows.length), amount, due_date:r.due.value||null, sort_order:i}); }
+    await api.replaceMilestones(old.map(m=>m.id), list);
+  }, 'Save milestones', {noFocus:true});
 }
 
 function openClientSheet(c){
@@ -728,25 +807,33 @@ function renderLogin(v){
 const cfg = window.LEDGER_CONFIG || {};
 const sb = (window.supabase && cfg.supabaseUrl && cfg.supabaseAnonKey) ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey) : null;
 const ms = t => t ? Date.parse(t) : 0;
-const TABLES = ['clients','projects','txns'];
+const TABLES = ['clients','projects','txns','milestones'];
+const OPTIONAL = ['milestones']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
 // Columns added for the dashboard default to empty, so the app still loads before supabase/schema.sql is re-run.
 const map = {
   clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
   projects: r => ({ id:r.id, clientId:r.client_id, name:r.name, status:r.status||'active', description:r.description||'', quoted:Number(r.quoted)||0,
     previewUrl:cleanUrl(r.preview_url)||'', liveUrl:cleanUrl(r.live_url)||'', githubUrl:cleanUrl(r.github_url)||'', startDate:r.start_date||null, dueDate:r.due_date||null, createdAt:ms(r.created_at) }),
-  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, createdAt:ms(r.created_at) })
+  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, createdAt:ms(r.created_at) }),
+  milestones: r => ({ id:r.id, projectId:r.project_id, name:r.name||'', amount:Number(r.amount)||0, dueDate:r.due_date||null, order:r.sort_order??0, createdAt:ms(r.created_at) })
 };
 async function load(){
   const res = await Promise.all(TABLES.map(t=>sb.from(t).select('*')));
-  const bad = res.find(r=>r.error);
+  const bad = res.find((r,i)=>r.error && !OPTIONAL.includes(TABLES[i]));
   if(bad){ S.error='Couldn’t load your ledger: '+bad.error.message; render(); return; }
-  TABLES.forEach((t,i)=>{ S[t]=res[i].data.map(map[t]); });
+  TABLES.forEach((t,i)=>{ S[t]=(res[i].error?[]:res[i].data).map(map[t]); });
   S.ready=true; S.error=''; render();
 }
 const api = {
   async insert(table,row){ const { data, error } = await sb.from(table).insert(row).select('id').single(); if(error) throw error; await load(); return data.id; },
   async update(table,id,row){ const { error } = await sb.from(table).update(row).eq('id',id); if(error) throw error; await load(); },
-  async del(table,id){ const { error } = await sb.from(table).delete().eq('id',id); if(error) throw error; await load(); }
+  async del(table,id){ const { error } = await sb.from(table).delete().eq('id',id); if(error) throw error; await load(); },
+  // The new list goes in before the old rows come out, so a failed save never loses the old milestones.
+  async replaceMilestones(oldIds,rows){
+    if(rows.length){ const { error } = await sb.from('milestones').insert(rows); if(error) throw error; }
+    for(const id of oldIds){ const { error } = await sb.from('milestones').delete().eq('id',id); if(error) throw error; }
+    await load();
+  }
 };
 function openNewPasswordSheet(){
   const p=h('input',{id:'np',type:'password',autocomplete:'new-password',minlength:'8',required:true});
@@ -767,7 +854,7 @@ if(!sb){
     S.authReady=true; S.session=session;
     if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
     if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
-    else { S.clients=[]; S.projects=[]; S.txns=[]; S.ready=false; closeSheet(); render(); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.ready=false; closeSheet(); render(); }
   });
 }
 })();
