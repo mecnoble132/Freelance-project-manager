@@ -26,14 +26,14 @@ test.before(async () => { browser = await chromium.launch(); });
 test.after(async () => { if (browser) await browser.close(); });
 
 // Opens the site on a fresh page. Returns the page and the list of browser errors seen.
-async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period } = {}) {
+async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30' } = {}) {
   const context = await browser.newContext({ viewport, colorScheme, timezoneId: 'Asia/Kolkata', locale: 'en-IN' });
   t.after(() => context.close());
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.clock.setFixedTime(new Date('2026-10-23T12:00:00+05:30'));
+  await page.clock.setFixedTime(new Date(now));
   const store = seed(new Store(parse()));
   await page.addInitScript(init => {
     window.__LEDGER_TEST__ = init;
@@ -82,7 +82,7 @@ test('forgot password', async t => {
 });
 
 test('dashboard numbers for all time and this month', async t => {
-  const page = await open(t);
+  const page = await open(t, { period: 'all' });
   await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
   assert.equal(await kpi(page, 'Revenue').textContent(), '₹40,000');
   assert.equal(await kpi(page, 'Spending').textContent(), '₹1,500');
@@ -100,8 +100,42 @@ test('dashboard numbers for all time and this month', async t => {
   assert.equal(await page.evaluate(() => localStorage.getItem('ledger.period')), '12m');
 });
 
-test('dashboard lists: still to collect, top projects, spending, recent money', async t => {
+test('the financial year is the default period, and the pills cover every period', async t => {
   const page = await open(t);
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.deepEqual(await page.locator('.pills button').allTextContents(), ['FY 2026–27', 'FY 2025–26', 'This month', 'Last 12 months', 'This year', 'All time']);
+  assert.equal(await page.locator('.pills button[aria-pressed="true"]').textContent(), 'FY 2026–27');
+  assert.equal(await page.locator('.pills button:has-text("FY 2026–27")').getAttribute('title'), 'This financial year');
+  // Same totals as get_summary with this_fy and last_fy (see ledger.test.js).
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹20,000');
+  assert.equal(await kpi(page, 'Spending').textContent(), '₹1,000');
+  await page.waitForSelector('text=/no date/i');
+  assert.match(await page.locator('details.tbl').textContent(), /October 2026.*April 2026/s);
+  assert.doesNotMatch(await page.locator('details.tbl').textContent(), /March 2026|November 2026/);
+  await page.click('.pills button:has-text("FY 2025–26")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹15,000');
+  assert.equal(await kpi(page, 'Spending').textContent(), '₹500');
+  assert.equal(await page.locator('details.tbl tbody tr').count(), 12);
+  assert.equal(await page.evaluate(() => localStorage.getItem('ledger.period')), 'last_fy');
+  await page.goto(SITE + '#/money');
+  assert.equal(await page.locator('.pills button[aria-pressed="true"]', { hasText: 'FY' }).textContent(), 'FY 2025–26');
+  assert.equal(await page.locator('#view .row').count(), 2);
+});
+
+test('31 March and 1 April land in different financial years', async t => {
+  const march = await open(t, { now: '2027-03-31T23:30:00+05:30' });
+  await heading(march).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await march.locator('.pills button[aria-pressed="true"]').textContent(), 'FY 2026–27');
+  const april = await open(t, { now: '2027-04-01T00:10:00+05:30' });
+  await heading(april).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await april.locator('.pills button[aria-pressed="true"]').textContent(), 'FY 2027–28');
+  assert.equal(await kpi(april, 'Revenue').textContent(), '₹0');
+  await april.click('.pills button:has-text("FY 2026–27")');
+  assert.equal(await kpi(april, 'Revenue').textContent(), '₹20,000');
+});
+
+test('dashboard lists: still to collect, top projects, spending, recent money', async t => {
+  const page = await open(t, { period: 'all' });
   const card = title => page.locator('.card').filter({ has: page.locator('h2', { hasText: title }) });
   await card('Still to collect').waitFor();
   assert.match(await card('Still to collect').textContent(), /Website.*GeekBoz.*₹20,000 of ₹50,000 paid.*₹30,000/);
@@ -163,7 +197,7 @@ test('an expense with a new project from the money sheet', async t => {
 });
 
 test('edit and delete a money entry', async t => {
-  const page = await open(t, { hash: '#/money' });
+  const page = await open(t, { hash: '#/money', period: 'all' });
   await page.click('button[aria-label="Edit Advance, ₹20,000"]');
   await page.fill('#m-amount', '25000');
   await page.click('.sheet button:has-text("Save changes")');

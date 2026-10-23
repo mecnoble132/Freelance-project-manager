@@ -8,7 +8,7 @@ My personal web app for running my website development service: every client, ev
 
 ## What it does
 
-- **Dashboard**: revenue, spending, profit and margin for this month, the last 12 months, this year or all time; money still to collect; a month-by-month chart of money in and out; most profitable projects; where the money went by category; recent money
+- **Dashboard**: revenue, spending, profit and margin for this financial year (April–March, the default), last financial year, this month, the last 12 months, this calendar year or all time; money still to collect; a month-by-month chart of money in and out; most profitable projects; where the money went by category; recent money
 - **Projects**: every project as a card with its client, status (Lead, In progress, On hold, Done), description, preview / live / GitHub links, quoted price, how much is paid, spent and profit. Filter by status and search
 - **Project page**: all of the above plus start and due dates and every payment and expense on it
 - **Clients**: each client's projects, revenue, profit, contact and notes. A new client can be added on its own or while creating a project
@@ -44,8 +44,8 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 
 | Tool | What it returns |
 |---|---|
-| `get_summary` | Revenue, spending, profit, margin, still to collect, monthly totals, spending by category, top projects, for any period |
-| `compare_periods` | Two periods side by side (this vs last month, this vs last year, or any dates) |
+| `get_summary` | Revenue, spending, profit, margin, still to collect, monthly totals, spending by category, top projects, for any period (including this and last financial year) |
+| `compare_periods` | Two periods side by side (this vs last month, this vs last financial year, this vs last year, or any dates) |
 | `get_attention_items` | Overdue and soon-due projects, money owed, open leads, projects on hold, missing quotes and links |
 | `search` | Clients, projects and money entries containing some text |
 | `list_projects` / `get_project` | Projects with client, status, description, links, dates and money; one project's entries |

@@ -3,7 +3,7 @@
 const STATUS_LABELS = { lead: 'Lead', active: 'In progress', paused: 'On hold', done: 'Done' };
 const STATUSES = Object.keys(STATUS_LABELS);
 const CATEGORIES = ['Domain', 'Hosting', 'Software & plugins', 'Design assets', 'Contractor', 'Ads & marketing', 'Travel', 'Other'];
-const PERIODS = ['this_month', 'last_month', 'last_12_months', 'this_year', 'last_year', 'all_time'];
+const PERIODS = ['this_month', 'last_month', 'last_12_months', 'this_fy', 'last_fy', 'this_year', 'last_year', 'all_time'];
 
 const guessCategory = note => CATEGORIES.find(c => c.toLowerCase() === String(note || '').trim().toLowerCase()) || 'Other';
 const round = n => Math.round(n * 100) / 100;
@@ -13,6 +13,9 @@ const pad = n => String(n).padStart(2, '0');
 function todayIST() { return new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); }
 function monthStart(y, m) { const d = new Date(Date.UTC(y, m - 1, 1)); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-01'; }
 function monthEnd(y, m) { const d = new Date(Date.UTC(y, m, 0)); return d.toISOString().slice(0, 10); }
+// Indian financial years run April to March: FY 2026–27 is 2026-04-01 to 2027-03-31.
+const fyLabel = y => 'FY ' + y + '–' + String(y + 1).slice(2);
+const fyRange = y => ({ from: y + '-04-01', to: (y + 1) + '-03-31', label: fyLabel(y) });
 
 function periodRange(period, from, to) {
   if (from || to) return { from: from || null, to: to || null, label: (from || 'start') + ' to ' + (to || 'today') };
@@ -20,6 +23,8 @@ function periodRange(period, from, to) {
   switch (period) {
     case 'this_month': return { from: monthStart(y, m), to: null, label: 'This month' };
     case 'last_month': return { from: monthStart(y, m - 1), to: monthEnd(y, m - 1), label: 'Last month' };
+    case 'this_fy': return fyRange(m >= 4 ? y : y - 1);
+    case 'last_fy': return fyRange(m >= 4 ? y - 1 : y - 2);
     case 'this_year': return { from: y + '-01-01', to: null, label: 'This year' };
     case 'last_year': return { from: (y - 1) + '-01-01', to: (y - 1) + '-12-31', label: 'Last year' };
     case 'last_12_months': return { from: monthStart(y, m - 11), to: null, label: 'Last 12 months' };
@@ -153,7 +158,8 @@ class Ledger {
 
   comparePeriods({ preset, a_from, a_to, b_from, b_to } = {}) {
     let a, b;
-    if (preset === 'year_vs_last_year') { a = { period: 'this_year' }; b = { period: 'last_year' }; }
+    if (preset === 'fy_vs_last_fy') { a = { period: 'this_fy' }; b = { period: 'last_fy' }; }
+    else if (preset === 'year_vs_last_year') { a = { period: 'this_year' }; b = { period: 'last_year' }; }
     else if (preset === 'last_12_vs_previous_12') {
       const t = todayIST(), y = Number(t.slice(0, 4)), m = Number(t.slice(5, 7));
       a = { period: 'last_12_months' }; b = { from: monthStart(y, m - 23), to: monthEnd(y, m - 12) };

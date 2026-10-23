@@ -28,6 +28,14 @@ test('expense categories match', () => {
   assert.deepEqual(arrayIn(HTML, /const CATEGORIES = \[(.*?)\];/), ledger.CATEGORIES);
 });
 
+test('every period on the website has a matching MCP period', () => {
+  const site = [.../const PERIODS = \[(.*?)\];\n/.exec(HTML)[1].matchAll(/\['([a-z0-9_]+)'/g)].map(m => m[1]);
+  const server = { month: 'this_month', '12m': 'last_12_months', this_fy: 'this_fy', last_fy: 'last_fy', year: 'this_year', all: 'all_time' };
+  assert.deepEqual(site.slice().sort(), Object.keys(server).sort(), 'index.html PERIODS changed: update this map and ledger.js');
+  for (const k of site) assert.ok(ledger.PERIODS.includes(server[k]), k + ' has no matching period in ledger.js');
+  assert.match(HTML, /period:pref\('period','this_fy'\)/, 'the financial year should be the default period');
+});
+
 test('the website and the MCP server load the same tables, and they all exist', () => {
   const site = arrayIn(HTML, /const TABLES = \[(.*?)\];/);
   const server = arrayIn(LEDGER, /Promise\.all\(\[(.*?)\]\.map/);
