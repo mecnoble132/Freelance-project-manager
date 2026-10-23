@@ -1,7 +1,7 @@
 // Changes made through the MCP server. Each tool call is one "change": every row it inserts, updates or deletes
 // is recorded in activity_log under one batch id, so the whole call can be listed and undone.
 const crypto = require('crypto');
-const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory, round } = require('./ledger');
+const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory, round, nextInvoiceNumber, addDays } = require('./ledger');
 
 class Invalid extends Error {}
 const fail = msg => { throw new Invalid(msg); };
@@ -107,11 +107,12 @@ async function deleteClient(db, a) {
   const r = L.resolveClient(a.client); if (r.error) return r;
   const c = L.raw.clients.find(x => x.id === r.client.id);
   const projects = L.raw.projects.filter(p => p.client_id === c.id), txns = L.raw.txns.filter(t => t.client_id === c.id);
-  const milestones = L.raw.milestones.filter(m => projects.some(p => p.id === m.project_id));
-  if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length,
+  const milestones = L.raw.milestones.filter(m => projects.some(p => p.id === m.project_id)), invoices = L.raw.invoices.filter(i => i.client_id === c.id);
+  if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length, invoices: invoices.map(i => i.number),
     moneyIn: txns.filter(t => t.type !== 'out').reduce((s, t) => s + Number(t.amount), 0), moneyOut: txns.filter(t => t.type === 'out').reduce((s, t) => s + Number(t.amount), 0) });
   const ch = new Change(db, 'Deleted client ' + c.name + ' with ' + projects.length + ' projects and ' + txns.length + ' entries'); await ch.ready();
   for (const t of txns) await ch.remove('txns', t);
+  for (const i of invoices) await ch.remove('invoices', i);
   for (const m of milestones) await ch.remove('milestones', m);
   for (const p of projects) await ch.remove('projects', p);
   await ch.remove('clients', c);
@@ -174,12 +175,13 @@ async function deleteProject(db, a) {
   const L = await load(db);
   const r = L.resolveProject(a.project, a.client); if (r.error) return r;
   const p = L.raw.projects.find(x => x.id === r.project.id), txns = L.raw.txns.filter(t => t.project_id === p.id);
-  const milestones = L.raw.milestones.filter(m => m.project_id === p.id);
+  const milestones = L.raw.milestones.filter(m => m.project_id === p.id), invoices = L.raw.invoices.filter(i => i.project_id === p.id);
   const label = p.name + ' (' + L.clientName(p.client_id) + ')';
   if (a.confirm !== true) return confirmFirst('deleted', { project: label, transactions: txns.length, milestones: milestones.length,
     whatHappensToMoney: txns.length ? (a.delete_transactions ? 'Its ' + txns.length + ' money entries will be deleted too.' : 'Its ' + txns.length + ' money entries stay with the client under "No project". Pass delete_transactions: true to delete them instead.') : 'It has no money entries.' });
   const ch = new Change(db, 'Deleted project ' + label); await ch.ready();
   for (const t of txns) { if (a.delete_transactions) await ch.remove('txns', t); else await ch.update('txns', t, { project_id: null }); }
+  for (const i of invoices) await ch.update('invoices', i, { project_id: null, milestone_id: null }); // invoices stay with the client
   for (const m of milestones) await ch.remove('milestones', m);
   await ch.remove('projects', p);
   return done('Deleted ' + label + (txns.length ? (a.delete_transactions ? ' and its ' + txns.length + ' money entries.' : '. Its ' + txns.length + ' money entries are now under "No project".') : '.'), {}, await ch.commit());
@@ -200,11 +202,19 @@ function placeEntry(L, e) {
 function entryRow(L, e, i) {
   const where = i === undefined ? '' : 'Entry ' + (i + 1) + ': ';
   const type = e.type === 'out' || e.type === 'expense' ? 'out' : e.type === 'in' || e.type === 'payment' ? 'in' : fail(where + 'type must be "in" (payment) or "out" (expense).');
-  const place = placeEntry(L, e);
+  // A payment for an invoice goes to the invoice's client and project.
+  let inv = null;
+  if (text(e.invoice)) {
+    const r = L.resolveInvoice(e.invoice); if (r.error) return { ...r, error: where + r.error, error_only: true };
+    inv = r.invoice;
+    if (type === 'out') fail(where + 'Only payments (money in) can be for an invoice.');
+    if (inv.status === 'cancelled') return { error: where + inv.number + ' is cancelled, so nothing is owed on it.', error_only: true };
+  }
+  const place = inv ? { client_id: inv.clientId, project_id: inv.projectId, label: inv.number + ' (' + L.clientName(inv.clientId) + ')' } : placeEntry(L, e);
   if (place.error) return { ...place, error: where + place.error, error_only: true };
   const note = text(e.note, 500);
   return { row: { client_id: place.client_id, project_id: place.project_id, type, amount: money(e.amount, { label: where + 'Amount' }),
-    category: type === 'out' ? category(e.category, note) : '', note, date: e.date === undefined ? todayIST() : date(e.date, where + 'Date') }, label: place.label };
+    category: type === 'out' ? category(e.category, note) : '', note, date: e.date === undefined ? todayIST() : date(e.date, where + 'Date'), ...(inv ? { invoice_id: inv.id } : {}) }, label: place.label };
 }
 
 async function addTransactions(db, entries, summaryWord) {
@@ -217,7 +227,7 @@ async function addTransactions(db, entries, summaryWord) {
   const sum = t => built.filter(b => b.row.type === t).reduce((s, b) => s + b.row.amount, 0);
   const ch = new Change(db, summaryWord || ('Added ' + built.length + ' money entries')); await ch.ready();
   const rows = await ch.insert('txns', built.map(b => b.row));
-  const L2 = new Ledger(L.raw.clients, L.raw.projects, rows);
+  const L2 = new Ledger(L.raw.clients, L.raw.projects, rows, [], L.raw.invoices);
   return done((built.length === 1 ? 'Saved ' : 'Saved ' + built.length + ' entries: ') + (sum('in') ? '₹' + sum('in').toLocaleString('en-IN') + ' in' : '') + (sum('in') && sum('out') ? ', ' : '') + (sum('out') ? '₹' + sum('out').toLocaleString('en-IN') + ' out' : '') + '.',
     { entries: rows.map(r => L2.txnSummary(L2.txns.find(t => t.id === r.id))) }, await ch.commit());
 }
@@ -233,6 +243,11 @@ async function updateTransaction(db, a) {
   if (given(a.note)) patch.note = text(a.note, 500);
   const type = patch.type || before.type;
   if (given(a.category) || given(a.type)) patch.category = type === 'out' ? category(a.category ?? before.category, patch.note ?? before.note) : '';
+  if (given(a.invoice)) {
+    if (!a.invoice) patch.invoice_id = null;
+    else { const r = L.resolveInvoice(a.invoice); if (r.error) return r; if (r.invoice.status === 'cancelled') return { error: r.invoice.number + ' is cancelled.' };
+      patch.invoice_id = r.invoice.id; patch.client_id = r.invoice.clientId; patch.project_id = r.invoice.projectId; }
+  }
   if (given(a.project) || given(a.client)) {
     if (given(a.project) && !a.project) { patch.project_id = null; if (a.client) { const c = L.resolveClient(a.client); if (c.error) return c; patch.client_id = c.client.id; } }
     else { const place = placeEntry(L, { project: a.project, client: a.client }); if (place.error) return place; patch.client_id = place.client_id; patch.project_id = place.project_id; }
@@ -240,7 +255,7 @@ async function updateTransaction(db, a) {
   if (!Object.keys(patch).length) fail('Say what to change on the entry.');
   const ch = new Change(db, 'Edited money entry'); await ch.ready();
   const t = await ch.update('txns', before, patch);
-  const L2 = new Ledger(L.raw.clients, L.raw.projects, [t]);
+  const L2 = new Ledger(L.raw.clients, L.raw.projects, [t], [], L.raw.invoices);
   return done('Updated the entry.', { entry: L2.txnSummary(L2.txns[0]) }, await ch.commit());
 }
 
@@ -289,12 +304,106 @@ async function setMilestones(db, a) {
   if (!list.length && !old.length) return { error: label + ' has no milestones to remove.' };
   const total = round(list.reduce((x, m) => x + m.amount, 0));
   const ch = new Change(db, (list.length ? 'Set ' + list.length + ' milestones on ' : 'Removed the milestones from ') + label); await ch.ready();
+  for (const i of L.raw.invoices.filter(i => old.some(m => m.id === i.milestone_id))) await ch.update('invoices', i, { milestone_id: null });
   for (const m of old) await ch.remove('milestones', m);
   const rows = list.length ? await ch.insert('milestones', list.map((m, i) => ({ project_id: p.id, name: m.name, amount: m.amount, due_date: m.due_date, sort_order: i }))) : [];
   const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones.filter(m => m.project_id !== p.id).concat(rows));
   return done(list.length ? 'Set ' + list.length + ' milestones on ' + label + ', totalling ₹' + total.toLocaleString('en-IN') + '.' : 'Removed the milestones from ' + label + '.',
     { project: label, milestones: now.milestones(now.project(p.id)),
       warning: list.length && quoted && total !== quoted ? 'The milestones add up to ₹' + total.toLocaleString('en-IN') + ', but the quote is ₹' + quoted.toLocaleString('en-IN') + '. Tell the user.' : undefined }, await ch.commit());
+}
+
+// ---------- settings ----------
+const SETTING_FIELDS = { business_name: 200, address: 1000, phone: 100, email: 200, upi_id: 100, bank_details: 1000, invoice_prefix: 20, invoice_notes: 2000 };
+async function getSettings(db) { const L = await load(db); return { settings: L.settings, saved: !!L.raw.settings.length }; }
+
+async function updateSettings(db, a) {
+  const L = await load(db), before = L.raw.settings[0], patch = {};
+  for (const [k, max] of Object.entries(SETTING_FIELDS)) if (given(a[k])) patch[k] = text(a[k], max);
+  if (given(a.upi_id) && patch.upi_id && !/^[\w.\-]{2,256}@[a-z][a-z0-9.\-]{1,64}$/i.test(patch.upi_id)) fail('The UPI ID doesn\'t look right. It looks like name@bank, e.g. yourname@okhdfcbank.');
+  if (given(a.invoice_prefix) && !/^[A-Za-z0-9-]{1,10}$/.test(patch.invoice_prefix)) fail('The invoice prefix can only have letters, numbers and dashes (up to 10), like INV.');
+  if (given(a.payment_terms_days)) { const n = Number(a.payment_terms_days); if (!Number.isInteger(n) || n < 0 || n > 365) fail('Payment terms must be a whole number of days from 0 to 365.'); patch.payment_terms_days = n; }
+  if (!Object.keys(patch).length) fail('Say what to change: ' + Object.keys(SETTING_FIELDS).join(', ') + ' or payment_terms_days.');
+  const ch = new Change(db, 'Edited business details'); await ch.ready();
+  if (before) await ch.update('settings', before, patch); else await ch.insert('settings', patch);
+  const now = await load(db);
+  return done('Saved ' + Object.keys(patch).join(', ') + '.', { settings: now.settings }, await ch.commit());
+}
+
+// ---------- invoices ----------
+function invoiceItems(list) {
+  if (!Array.isArray(list) || !list.length) fail('Give at least one line item (description, quantity, rate).');
+  if (list.length > 50) fail('Use at most 50 line items.');
+  return list.map((it, i) => {
+    const description = text(it && it.description, 500); if (!description) fail('Line ' + (i + 1) + ' needs a description.');
+    const quantity = it.quantity === undefined || it.quantity === '' ? 1 : Number(it.quantity);
+    if (!(quantity > 0) || quantity > 1e6) fail('Line ' + (i + 1) + ': quantity must be above 0.');
+    return { description, quantity, rate: money(it.rate, { label: 'Line ' + (i + 1) + ' rate' }) };
+  });
+}
+const itemsTotal = items => round(items.reduce((a, i) => a + i.quantity * i.rate, 0));
+
+async function createInvoice(db, a) {
+  const L = await load(db);
+  let clientId, projectId = null, milestone = null, items;
+  if (text(a.project)) { const r = L.resolveProject(a.project, a.client); if (r.error) return r; clientId = r.project.clientId; projectId = r.project.id; }
+  else if (text(a.client)) { const r = L.resolveClient(a.client); if (r.error) return r; clientId = r.client.id; }
+  else fail('Say which client (and ideally which project) the invoice is for.');
+  if (text(a.milestone)) {
+    if (!projectId) fail('Give the project too, to pick its milestone.');
+    const p = L.project(projectId), ms = L.milestones(p);
+    const q = text(a.milestone).toLowerCase();
+    const hits = ms.filter(m => m.id === a.milestone || m.name.toLowerCase() === q);
+    if (hits.length !== 1) return { error: hits.length ? 'Several milestones match "' + a.milestone + '".' : 'No milestone on ' + L.projectLabel(p) + ' matches "' + a.milestone + '".', milestones: ms.map(m => m.name) };
+    milestone = hits[0];
+    if (!milestone.left) return { error: 'The ' + milestone.name + ' milestone is already paid.' };
+    const open = L.invoices.find(i => i.milestoneId === milestone.id && L.invoiceState(i).state !== 'cancelled');
+    if (open && !a.allow_duplicate) return { error: open.number + ' already invoices this milestone. Use it, cancel it first, or pass allow_duplicate: true.' };
+  }
+  items = given(a.items) ? invoiceItems(a.items) : milestone ? [{ description: L.project(projectId).title + ' — ' + milestone.name, quantity: 1, rate: milestone.left }] : invoiceItems(a.items);
+  const issue = given(a.issue_date) ? date(a.issue_date, 'Issue date') : todayIST();
+  if (!issue) fail('The issue date can\'t be empty.');
+  const due = given(a.due_date) ? date(a.due_date, 'Due date') : addDays(issue, L.settings.paymentTermsDays);
+  if (due && due < issue) fail('The due date can\'t be before the issue date.');
+  const number = nextInvoiceNumber(L.invoices.map(i => i.number), L.settings.invoicePrefix, issue);
+  const total = itemsTotal(items); if (!(total > 0)) fail('The invoice total must be above ₹0.');
+  const ch = new Change(db, 'Created invoice ' + number); await ch.ready();
+  const [row] = await ch.insert('invoices', { client_id: clientId, project_id: projectId, milestone_id: milestone ? milestone.id : null, number, issue_date: issue, due_date: due,
+    items, total, status: a.mark_sent ? 'sent' : 'draft', notes: given(a.notes) ? text(a.notes, 2000) : L.settings.invoiceNotes, sent_at: a.mark_sent ? new Date().toISOString() : null });
+  const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones, L.raw.invoices.concat([row]), L.raw.settings);
+  return done('Created ' + number + ' for ' + L.clientName(clientId) + ', ₹' + total.toLocaleString('en-IN') + (a.mark_sent ? ', marked as sent.' : ' (draft).'),
+    { invoice: now.getInvoice({ invoice: row.id }), setupNeeded: L.settings.upiId && L.settings.businessName ? undefined : 'Business name or UPI ID isn\'t set yet; offer to add them with update_settings so the invoice shows who to pay.' }, await ch.commit());
+}
+
+async function updateInvoice(db, a) {
+  const L = await load(db);
+  const r = L.resolveInvoice(a.invoice); if (r.error) return r;
+  const before = L.raw.invoices.find(i => i.id === r.invoice.id), patch = {};
+  if (given(a.status)) {
+    const s = text(a.status).toLowerCase();
+    if (!['draft', 'sent', 'cancelled'].includes(s)) fail('status must be draft, sent or cancelled. Paid is worked out from the payments linked to it.');
+    patch.status = s; if (s === 'sent' && !before.sent_at) patch.sent_at = new Date().toISOString();
+  }
+  if (before.status === 'cancelled' && patch.status !== 'draft' && patch.status !== 'sent') fail(before.number + ' is cancelled. Set status to sent or draft to reopen it first.');
+  if (given(a.items)) { patch.items = invoiceItems(a.items); patch.total = itemsTotal(patch.items); if (!(patch.total > 0)) fail('The invoice total must be above ₹0.'); }
+  if (given(a.issue_date)) { patch.issue_date = date(a.issue_date, 'Issue date'); if (!patch.issue_date) fail('The issue date can\'t be empty.'); }
+  if (given(a.due_date)) patch.due_date = date(a.due_date, 'Due date');
+  if (given(a.notes)) patch.notes = text(a.notes, 2000);
+  if (!Object.keys(patch).length) fail('Say what to change: status, items, issue_date, due_date or notes.');
+  const ch = new Change(db, (patch.status === 'cancelled' ? 'Cancelled invoice ' : 'Edited invoice ') + before.number); await ch.ready();
+  const row = await ch.update('invoices', before, patch);
+  const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones, L.raw.invoices.map(i => i.id === row.id ? row : i), L.raw.settings);
+  return done((patch.status === 'cancelled' ? 'Cancelled ' : 'Updated ') + before.number + '.', { invoice: now.getInvoice({ invoice: row.id }) }, await ch.commit());
+}
+
+// Records that the user reminded a client (the message itself is sent by the user, never by this server).
+async function logReminder(db, a) {
+  const L = await load(db);
+  const facts = L.reminderFacts(a); if (facts.error) return facts;
+  const rows = facts.invoices.map(f => L.raw.invoices.find(i => i.number === f.number));
+  const t = todayIST(), ch = new Change(db, 'Logged a reminder to ' + facts.client); await ch.ready();
+  for (const r of rows) await ch.update('invoices', r, { last_reminded: t, reminder_count: (r.reminder_count || 0) + 1 });
+  return done('Logged a reminder to ' + facts.client + ' for ' + rows.map(r => r.number).join(', ') + '.', {}, await ch.commit());
 }
 
 // ---------- history and undo ----------
@@ -322,12 +431,14 @@ async function undoChange(db, a) {
   const insertedHere = new Set(entries.filter(e => e.op === 'insert').map(e => e.row_id));
   // Undoing an insert deletes the row; refuse if something added later depends on it.
   for (const e of entries.filter(e => e.op === 'insert')) {
-    const deps = e.table_name === 'clients' ? [...L.raw.projects.filter(p => p.client_id === e.row_id), ...L.raw.txns.filter(t => t.client_id === e.row_id)]
-      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id)] : [];
+    const deps = e.table_name === 'clients' ? [...L.raw.projects.filter(p => p.client_id === e.row_id), ...L.raw.txns.filter(t => t.client_id === e.row_id), ...L.raw.invoices.filter(i => i.client_id === e.row_id)]
+      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id), ...L.raw.invoices.filter(i => i.project_id === e.row_id)]
+      : e.table_name === 'milestones' ? L.raw.invoices.filter(i => i.milestone_id === e.row_id)
+      : e.table_name === 'invoices' ? L.raw.txns.filter(t => t.invoice_id === e.row_id) : [];
     const later = deps.filter(d => !insertedHere.has(d.id));
     if (later.length) return { error: 'Can\'t undo "' + e.summary + '": ' + later.length + ' newer item(s) were added to what it created. Undo or move those first.' };
   }
-  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones };
+  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones, settings: L.raw.settings, invoices: L.raw.invoices };
   const skipped = [];
   for (const e of entries) {
     const exists = current[e.table_name].some(r => r.id === e.row_id);
@@ -339,4 +450,5 @@ async function undoChange(db, a) {
   return { done: true, message: 'Undid: ' + entries[0].summary + '.', change_id: batch, skipped: skipped.length ? skipped : undefined };
 }
 
-module.exports = { createClient, updateClient, deleteClient, createProject, updateProject, deleteProject, setMilestones, addTransactions, updateTransaction, deleteTransactions, listChanges, undoChange, Invalid };
+module.exports = { createClient, updateClient, deleteClient, createProject, updateProject, deleteProject, setMilestones, addTransactions, updateTransaction, deleteTransactions,
+  getSettings, updateSettings, createInvoice, updateInvoice, logReminder, listChanges, undoChange, Invalid };

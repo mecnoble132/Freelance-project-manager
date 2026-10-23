@@ -172,6 +172,15 @@ test('MCP protocol details', async t => {
   assert.equal(get.status, 405);
   const oldVersion = await rpc(a, { jsonrpc: '2.0', id: 6, method: 'initialize', params: { protocolVersion: '1999-01-01' } });
   assert.equal(oldVersion.json.result.protocolVersion, '2025-06-18');
+  assert.deepEqual(oldVersion.json.result.capabilities, { tools: { listChanged: false }, prompts: { listChanged: false } });
+  const prompts = await rpc(a, { jsonrpc: '2.0', id: 7, method: 'prompts/list' });
+  assert.deepEqual(prompts.json.result.prompts.map(p => p.name), ['who_owes_me', 'weekly_review']);
+  assert.ok(prompts.json.result.prompts.every(p => p.title && p.description && !('text' in p)));
+  const got = await rpc(a, { jsonrpc: '2.0', id: 8, method: 'prompts/get', params: { name: 'who_owes_me' } });
+  assert.equal(got.json.result.messages[0].role, 'user');
+  assert.match(got.json.result.messages[0].content.text, /list_overdue/);
+  const nope = await rpc(a, { jsonrpc: '2.0', id: 9, method: 'prompts/get', params: { name: 'nope' } });
+  assert.equal(nope.json.error.code, -32602);
 });
 
 test('tokens expire, refresh, and stop when the account is gone', async t => {

@@ -172,6 +172,133 @@ test('undoing a new project is refused once milestones were set on it', async t 
   assert.ok(!rows(ctx.store, 'projects').some(p => p.name === 'Shop'));
 });
 
+const inv = (store, number) => store.rows.invoices.find(i => i.number === number && i.user_id === OWNER);
+
+test('create an invoice from a milestone: next number, due after the payment terms, draft by default', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'create_invoice', { project: 'GeekBoz Website', milestone: 'Launch' }, r => {
+    const row = inv(ctx.store, 'INV/2026-27/004');
+    assert.deepEqual([row.client_id, row.project_id, row.milestone_id, row.issue_date, row.due_date, Number(row.total), row.status, row.notes, row.sent_at],
+      [ids.geekboz, ids.gbSite, ids.msLaunch, '2026-10-23', '2026-10-30', 15000, 'draft', 'Thank you!', null]);
+    assert.deepEqual(row.items, [{ description: 'Website — Launch', quantity: 1, rate: 15000 }]);
+    assert.equal(r.invoice.state, 'draft');
+    assert.match(r.invoice.upiLink, /am=15000\.00/);
+    assert.equal(r.setupNeeded, undefined);
+  });
+  assert.match((await call(ctx.db, 'create_invoice', { project: 'GeekBoz Website', milestone: 'Design' })).error, /INV\/2026-27\/002 already invoices this milestone/);
+  assert.match((await call(ctx.db, 'create_invoice', { project: 'GeekBoz Website', milestone: 'Advance' })).error, /already paid/);
+  assert.match((await call(ctx.db, 'create_invoice', { project: 'GeekBoz Website', milestone: 'Nope' })).error, /No milestone/);
+  const dupe = await call(ctx.db, 'create_invoice', { project: 'GeekBoz Website', milestone: 'Design', allow_duplicate: true });
+  assert.equal(dupe.invoice.number, 'INV/2026-27/004');
+});
+
+test('create an invoice from line items, already sent, and across 1 April', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'create_invoice', { client: 'Edustudy', items: [{ description: 'Logo', rate: 3000 }, { description: 'Pages', quantity: 3, rate: '₹1,500' }], mark_sent: true, notes: 'UPI preferred' }, r => {
+    const row = inv(ctx.store, 'INV/2026-27/004');
+    assert.deepEqual([Number(row.total), row.status, row.notes, row.project_id, !!row.sent_at], [7500, 'sent', 'UPI preferred', null, true]);
+    assert.equal(r.invoice.state, 'unpaid');
+  });
+  await changeAndUndo(t, ctx, 'create_invoice', { client: 'Edustudy', items: [{ description: 'Support', rate: 1000 }], issue_date: '2027-04-01', due_date: '2027-04-15' }, r => {
+    assert.equal(r.invoice.number, 'INV/2027-28/001');
+  });
+  await changeAndUndo(t, ctx, 'create_invoice', { client: 'Edustudy', items: [{ description: 'Support', rate: 1000 }], issue_date: '2027-03-31' }, r => {
+    assert.deepEqual([r.invoice.number, r.invoice.dueDate], ['INV/2026-27/004', '2027-04-07']);
+  });
+  const add = a => call(ctx.db, 'create_invoice', { client: 'Edustudy', ...a });
+  await assert.rejects(add({}), /at least one line item/);
+  await assert.rejects(add({ items: [{ description: '', rate: 100 }] }), /needs a description/);
+  await assert.rejects(add({ items: [{ description: 'X', rate: 0 }] }), /above 0/);
+  await assert.rejects(add({ items: [{ description: 'X', quantity: -1, rate: 10 }] }), /quantity/);
+  await assert.rejects(add({ items: [{ description: 'X', rate: 10 }], issue_date: '2026-10-10', due_date: '2026-10-01' }), /before the issue date/);
+  await assert.rejects(call(ctx.db, 'create_invoice', { items: [{ description: 'X', rate: 10 }] }), /which client/);
+});
+
+test('send, edit and cancel an invoice; a cancelled one is never owed', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'update_invoice', { invoice: '003', status: 'sent' }, r => {
+    assert.ok(inv(ctx.store, 'INV/2026-27/003').sent_at);
+    assert.equal(r.invoice.state, 'unpaid');
+  });
+  await changeAndUndo(t, ctx, 'update_invoice', { invoice: '003', items: [{ description: 'Hosting renewal', rate: 800 }], due_date: '' }, r => {
+    assert.deepEqual([Number(inv(ctx.store, 'INV/2026-27/003').total), r.invoice.dueDate], [800, null]);
+  });
+  await changeAndUndo(t, ctx, 'update_invoice', { invoice: 'INV/2026-27/002', status: 'cancelled' }, async r => {
+    assert.deepEqual([r.invoice.state, r.invoice.due], ['cancelled', 0]);
+    assert.equal((await call(ctx.db, 'list_overdue')).totalOverdue, 0);
+  });
+  await assert.rejects(call(ctx.db, 'update_invoice', { invoice: '2025-26/002', notes: 'x' }), /is cancelled/);
+  await assert.rejects(call(ctx.db, 'update_invoice', { invoice: '002', status: 'paid' }), /worked out from the payments/);
+  await assert.rejects(call(ctx.db, 'update_invoice', { invoice: '002' }), /Say what to change/);
+  assert.match((await call(ctx.db, 'update_invoice', { invoice: '077', status: 'sent' })).error, /No invoice matches/);
+});
+
+test('a payment for an invoice settles it, and unlinking the payment reopens it', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'add_payment', { amount: 15000, invoice: '002', note: 'Design' }, async r => {
+    const tx = rows(ctx.store, 'txns').find(x => x.note === 'Design');
+    assert.deepEqual([tx.invoice_id, tx.client_id, tx.project_id], [ids.invDesign, ids.geekboz, ids.gbSite]);
+    assert.equal(r.entries[0].invoice, 'INV/2026-27/002');
+    assert.equal((await call(ctx.db, 'get_invoice', { invoice: '002' })).state, 'paid');
+  });
+  await changeAndUndo(t, ctx, 'update_transaction', { id: ids.advance, invoice: '' }, async () => {
+    assert.equal(rows(ctx.store, 'txns').find(x => x.id === ids.advance).invoice_id, null);
+    const g = await call(ctx.db, 'get_invoice', { invoice: '001' });
+    assert.deepEqual([g.state, g.due], ['overdue', 20000]);
+  });
+  assert.match((await call(ctx.db, 'add_payment', { amount: 100, invoice: '2025-26/002' })).error, /cancelled/);
+  await assert.rejects(call(ctx.db, 'add_expense', { amount: 100, invoice: '002' }), /Only payments/);
+});
+
+test('log a reminder, and refuse when nothing is owed', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'log_reminder', { client: 'GeekBoz' }, r => {
+    const row = inv(ctx.store, 'INV/2026-27/002');
+    assert.deepEqual([row.reminder_count, row.last_reminded], [2, '2026-10-23']);
+    assert.match(r.message, /INV\/2026-27\/002/);
+  });
+  assert.match((await call(ctx.db, 'log_reminder', { client: 'Edustudy' })).error, /Nothing is owed/);
+  assert.match((await call(ctx.db, 'log_reminder', {})).error, /Say which/);
+});
+
+test('business details: edit them, and refuse bad values', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'update_settings', { upi_id: 'new@ybl', payment_terms_days: 15, invoice_prefix: 'MEC' }, r => {
+    assert.deepEqual([r.settings.upiId, r.settings.paymentTermsDays, r.settings.invoicePrefix], ['new@ybl', 15, 'MEC']);
+  });
+  await assert.rejects(call(ctx.db, 'update_settings', { upi_id: 'not a upi id' }), /UPI ID/);
+  await assert.rejects(call(ctx.db, 'update_settings', { invoice_prefix: 'INV/2' }), /prefix/);
+  await assert.rejects(call(ctx.db, 'update_settings', { payment_terms_days: 2.5 }), /whole number/);
+  await assert.rejects(call(ctx.db, 'update_settings', {}), /Say what to change/);
+});
+
+test('business details are added the first time they are saved', async t => {
+  const fresh = setup(t, { empty: true });
+  assert.deepEqual(await call(fresh.db, 'get_settings'), { settings: { businessName: '', address: '', phone: '', email: '', upiId: '', bankDetails: '', invoicePrefix: 'INV', paymentTermsDays: 7, invoiceNotes: '' }, saved: false });
+  await changeAndUndo(t, fresh, 'update_settings', { business_name: 'Mec' }, () => {
+    assert.deepEqual(rows(fresh.store, 'settings').map(x => [x.business_name, x.invoice_prefix, x.payment_terms_days]), [['Mec', 'INV', 7]]);
+  });
+});
+
+test('invoices stay right when projects, milestones and clients change', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'delete_project', { project: 'GeekBoz Website', confirm: true }, () => {
+    assert.deepEqual([inv(ctx.store, 'INV/2026-27/002').project_id, inv(ctx.store, 'INV/2026-27/002').milestone_id], [null, null]); // the invoice stays with the client
+  });
+  await changeAndUndo(t, ctx, 'set_milestones', { project: 'GeekBoz Website', split: [50, 50] }, () => {
+    assert.equal(inv(ctx.store, 'INV/2026-27/002').milestone_id, null);
+  });
+  const preview = await call(ctx.db, 'delete_client', { client: 'GeekBoz' });
+  assert.deepEqual(preview.invoices, ['INV/2026-27/001', 'INV/2026-27/002']);
+  await changeAndUndo(t, ctx, 'delete_client', { client: 'GeekBoz', confirm: true }, () => {
+    assert.ok(!rows(ctx.store, 'invoices', OWNER).some(i => i.client_id === ids.geekboz));
+  });
+  // Undoing a new invoice is refused once a payment is linked to it.
+  const made = await call(ctx.db, 'create_invoice', { client: 'Edustudy', items: [{ description: 'X', rate: 100 }], mark_sent: true });
+  await call(ctx.db, 'add_payment', { amount: 100, invoice: made.invoice.number });
+  assert.match((await call(ctx.db, 'undo_change', { change_id: made.change_id })).error, /newer item/);
+});
+
 test('log payments and expenses', async t => {
   const ctx = setup(t);
   await changeAndUndo(t, ctx, 'add_payment', { amount: '₹5,000', project: 'GeekBoz Website', note: 'Second payment' }, r => {

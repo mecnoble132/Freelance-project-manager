@@ -5,6 +5,12 @@
 //   still to collect 30,000 (GeekBoz Website: 50,000 quoted, 20,000 paid); Edustudy App is a lead worth 80,000
 //   GeekBoz Website milestones: Advance 20,000 (paid), Design 15,000 due 15 Oct (overdue by 8 days), Launch 15,000 due 28 Oct (due this week)
 //   Edustudy App has a milestone with a past due date, but it's a lead, so it's never overdue
+//   Invoices (business details set, UPI mec@okhdfcbank, 7 days' terms):
+//     INV/2026-27/001 GeekBoz Website Advance 20,000: paid by the Advance payment
+//     INV/2026-27/002 GeekBoz Website Design 15,000: sent, due 15 Oct, overdue by 8 days, reminded once on 18 Oct
+//     INV/2026-27/003 Edustudy (no project) 2,500 in two lines: draft
+//     INV/2025-26/001 Edustudy Website 15,000: paid by the Final payment (last financial year)
+//     INV/2025-26/002 Edustudy 5,000: cancelled
 const { mock } = require('node:test');
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
@@ -29,7 +35,13 @@ const ids = {
   msDesign: 'eeeeeeee-0000-4000-8000-000000000002',
   msLaunch: 'eeeeeeee-0000-4000-8000-000000000003',
   msLead: 'eeeeeeee-0000-4000-8000-000000000004',
-  otherMs: 'eeeeeeee-0000-4000-8000-000000000005'
+  otherMs: 'eeeeeeee-0000-4000-8000-000000000005',
+  invAdvance: 'ffffffff-0000-4000-8000-000000000001',
+  invDesign: 'ffffffff-0000-4000-8000-000000000002',
+  invDraft: 'ffffffff-0000-4000-8000-000000000003',
+  invOld: 'ffffffff-0000-4000-8000-000000000004',
+  invCancelled: 'ffffffff-0000-4000-8000-000000000005',
+  otherInv: 'ffffffff-0000-4000-8000-000000000006'
 };
 
 function seed(store) {
@@ -51,11 +63,24 @@ function seed(store) {
   m(ids.msDesign, ids.gbSite, 'Design', 15000, '2026-10-15', 1);
   m(ids.msLaunch, ids.gbSite, 'Launch', 15000, '2026-10-28', 2);
   m(ids.msLead, ids.eduApp, 'Advance', 40000, '2026-10-01', 0);
+  store.insert('settings', { business_name: 'Mec Web Studio', address: '12 MG Road, Kochi', phone: '90000 00000', email: 'hi@mec.dev', upi_id: 'mec@okhdfcbank',
+    bank_details: 'Mec Web Studio\nA/c 1234567890\nIFSC HDFC0001234', invoice_prefix: 'INV', payment_terms_days: 7, invoice_notes: 'Thank you!' }, OWNER);
+  const inv = (id, client_id, project_id, milestone_id, number, issue_date, due_date, items, status, extra = {}, uid = OWNER) => store.insert('invoices',
+    { id, client_id, project_id, milestone_id, number, issue_date, due_date, items, total: items.reduce((a, i) => a + i.quantity * i.rate, 0), status, ...extra }, uid);
+  inv(ids.invAdvance, ids.geekboz, ids.gbSite, ids.msAdvance, 'INV/2026-27/001', '2026-09-25', '2026-10-02', [{ description: 'Website — Advance', quantity: 1, rate: 20000 }], 'sent', { sent_at: '2026-09-25T10:00:00Z' });
+  inv(ids.invDesign, ids.geekboz, ids.gbSite, ids.msDesign, 'INV/2026-27/002', '2026-10-08', '2026-10-15', [{ description: 'Website — Design', quantity: 1, rate: 15000 }], 'sent', { sent_at: '2026-10-08T10:00:00Z', last_reminded: '2026-10-18', reminder_count: 1 });
+  inv(ids.invDraft, ids.edustudy, null, null, 'INV/2026-27/003', '2026-10-22', '2026-10-29', [{ description: 'Hosting renewal', quantity: 1, rate: 500 }, { description: 'Support hours', quantity: 2, rate: 1000 }], 'draft');
+  inv(ids.invOld, ids.edustudy, ids.eduSite, null, 'INV/2025-26/001', '2026-03-10', '2026-03-17', [{ description: 'Website — final payment', quantity: 1, rate: 15000 }], 'sent');
+  inv(ids.invCancelled, ids.edustudy, null, null, 'INV/2025-26/002', '2026-03-20', '2026-03-27', [{ description: 'Extra pages', quantity: 1, rate: 5000 }], 'cancelled');
+  store.update('txns', r => r.id === ids.advance, { invoice_id: ids.invAdvance });
+  store.update('txns', r => r.id === ids.eduFinal, { invoice_id: ids.invOld });
   // Someone else's data in the same database, which must never show up or change.
   c(ids.otherClient, 'GeekBoz', { contact: 'not yours' }, OTHER);
   p(ids.otherProject, ids.otherClient, 'Website', { quoted: 99999 }, OTHER);
   t(ids.otherTxn, ids.otherClient, ids.otherProject, 'in', 77777, { note: 'Advance', date: '2026-10-10' }, OTHER);
   m(ids.otherMs, ids.otherProject, 'Theirs', 99999, '2026-01-01', 0, OTHER);
+  store.insert('settings', { business_name: 'Not yours', upi_id: 'other@ybl' }, OTHER);
+  inv(ids.otherInv, ids.otherClient, ids.otherProject, null, 'INV/2026-27/001', '2026-10-01', '2026-10-08', [{ description: 'Theirs', quantity: 1, rate: 99999 }], 'sent', {}, OTHER);
   return store;
 }
 
