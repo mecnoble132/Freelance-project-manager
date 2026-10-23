@@ -30,7 +30,7 @@ function parseColumn(line) {
 // "status in ('lead', 'active')" → { column, values }; "amount > 0" → { column, op, n }.
 function parseInCheck(expr) {
   const m = /^\s*\(?\s*([a-z_]+)\s+in\s*\(([^)]*)\)/i.exec(expr || '');
-  if (m) return { column: m[1], rule: { values: m[2].split(',').map(s => s.trim().replace(/^'|'$/g, '')) } };
+  if (m) return { column: m[1], rule: { values: m[2].split(',').map(s => s.trim()).map(s => /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : s.replace(/^'|'$/g, '')) } };
   const n = /^\s*\(?\s*([a-z_]+)\s*(>=|>)\s*(-?\d+(?:\.\d+)?)\s*\)?\s*$/.exec(expr || '');
   return n ? { column: n[1], rule: { op: n[2], n: Number(n[3]) } } : null;
 }

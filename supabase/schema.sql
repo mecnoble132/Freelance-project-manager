@@ -250,3 +250,63 @@ create policy "own time entries" on public.time_entries
 alter table public.activity_log drop constraint if exists activity_log_table_name_check;
 alter table public.activity_log add constraint activity_log_table_name_check
   check (table_name in ('clients', 'projects', 'txns', 'milestones', 'settings', 'invoices', 'services', 'tasks', 'time_entries'));
+
+-- Tester launch (added later): every row that carries money stores its own currency, so deleting a project can't
+-- re-label its payments. Existing rows become INR from the default. Keep this list identical in api/_lib/ledger.js and index.html.
+alter table public.projects add column if not exists currency text not null default 'INR';
+alter table public.projects drop constraint if exists projects_currency_check;
+alter table public.projects add constraint projects_currency_check
+  check (currency in ('INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'));
+
+alter table public.txns add column if not exists currency text not null default 'INR';
+alter table public.txns drop constraint if exists txns_currency_check;
+alter table public.txns add constraint txns_currency_check
+  check (currency in ('INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'));
+
+alter table public.invoices add column if not exists currency text not null default 'INR';
+alter table public.invoices drop constraint if exists invoices_currency_check;
+alter table public.invoices add constraint invoices_currency_check
+  check (currency in ('INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'));
+
+alter table public.services add column if not exists currency text not null default 'INR';
+alter table public.services drop constraint if exists services_currency_check;
+alter table public.services add constraint services_currency_check
+  check (currency in ('INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'));
+
+-- Regional settings per user. The defaults are what the app assumed before: rupees, April financial year, India time.
+alter table public.settings add column if not exists default_currency text not null default 'INR';
+alter table public.settings drop constraint if exists settings_default_currency_check;
+alter table public.settings add constraint settings_default_currency_check
+  check (default_currency in ('INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'));
+alter table public.settings add column if not exists fy_start_month integer not null default 4;
+alter table public.settings drop constraint if exists settings_fy_start_month_check;
+alter table public.settings add constraint settings_fy_start_month_check check (fy_start_month in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12));
+alter table public.settings add column if not exists timezone text not null default 'Asia/Kolkata';
+alter table public.settings add column if not exists locale text not null default 'en-IN';
+alter table public.settings drop constraint if exists settings_locale_check;
+alter table public.settings add constraint settings_locale_check check (locale in ('en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'));
+
+-- Sample data (temporary): sample clients are flagged so "remove sample data" can delete them; their projects, payments and so on go with them.
+alter table public.clients add column if not exists is_sample boolean not null default false;
+
+-- Invite-only sign-up: only emails in this table can create an account. Row-level security is on and there are
+-- deliberately no policies, so the website and signed-in users can't read or change it; only the owner (SQL editor) can.
+create table if not exists public.allowed_emails (
+  email text primary key,
+  note text not null default '',
+  created_at timestamptz not null default now()
+);
+alter table public.allowed_emails enable row level security;
+
+create or replace function public.require_invited_email() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from public.allowed_emails where lower(email) = lower(new.email)) then
+    raise exception 'This email has not been invited yet.';
+  end if;
+  return new;
+end $$;
+revoke execute on function public.require_invited_email() from public, anon, authenticated;
+drop trigger if exists require_invited_email on auth.users;
+create trigger require_invited_email before insert on auth.users
+  for each row execute function public.require_invited_email();

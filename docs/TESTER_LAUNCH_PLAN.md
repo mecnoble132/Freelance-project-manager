@@ -8,7 +8,7 @@ Tick a step only when its "Done when" list is true, its tests pass and the full 
 
 | Step | What | Status |
 |---|---|---|
-| 1 | Database changes in `supabase/schema.sql` | not started |
+| 1 | Database changes in `supabase/schema.sql` | done in code and tests; **not yet run on the live database** (section 10) |
 | 2 | Server (MCP) understands currency, financial year, time zone | not started |
 | 3 | Website: currency, financial year, time zone, and the full Settings page | not started |
 | 4 | Invite-only sign-up and the first-run screen | not started |
@@ -416,4 +416,4 @@ Do: the owner (or you, with the owner's second email on the allow-list) signs up
 
 | Date | Step | Notes |
 |---|---|---|
-| | | |
+| 2026-10-23 | 1 | Added to `supabase/schema.sql`: `currency` (with a check on the fixed list, default `INR`) on `projects`, `txns`, `invoices`, `services`; `default_currency`, `fy_start_month`, `timezone`, `locale` on `settings`; `clients.is_sample`; the `allowed_emails` table (RLS on, no policies) and the `require_invited_email` trigger on `auth.users`. Verified on a scratch Postgres 16 with a stubbed `auth` schema: the file runs twice cleanly, an uninvited email is refused with the expected message, an invited one (different letter case) is accepted, existing users can still be updated. I also added `revoke execute … from public, anon, authenticated` on the gate function so it can't be called through the API. Test helpers: `schema.js` now reads numeric `in (…)` checks; `seed.js` has `seedUsd(store)` (a USD client/project/payments/invoice/renewal for the owner, kept out of `seed()` so the INR numbers don't move) and the `OTHER` user is now USD / January / New York. **Next person:** the live database has not been touched; run the schema through the Supabase connector before merging (section 10). `store.js` assumes every table has an `id`, but `allowed_emails` has none (`email` is the key), so step 6's "loop over every table" must skip it or handle that. |

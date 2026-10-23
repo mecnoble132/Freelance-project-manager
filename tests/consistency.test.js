@@ -12,7 +12,9 @@ const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const HTML = read('index.html'), WRITES = read('api/_lib/writes.js'), LEDGER = read('api/_lib/ledger.js');
 const schema = parse();
-const dataTables = Object.keys(schema).filter(t => t !== 'activity_log');
+// allowed_emails is the sign-up allow-list: owner-only, no user_id, not part of anyone's ledger (see its own test below).
+const dataTables = Object.keys(schema).filter(t => t !== 'activity_log' && t !== 'allowed_emails');
+const CURRENCY_TABLES = ['projects', 'txns', 'invoices', 'services'];
 const arrayIn = (src, re) => { const m = re.exec(src); assert.ok(m, 'couldn\'t find ' + re); return JSON.parse('[' + m[1].replace(/'/g, '"') + ']'); };
 
 test('project statuses match in every place they are listed', () => {
@@ -91,15 +93,17 @@ test('the website only reads columns that exist', () => {
 });
 
 test('schema.sql can be run again safely and only adds things', () => {
-  const sql = SQL.replace(/--[^\n]*/g, '');
+  const sql = SQL.replace(/--[^\n]*/g, '').replace(/\$\$[\s\S]*?\$\$/g, '$$$$');
   const statements = sql.split(';').map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean);
   const dropped = { policy: new Set(), constraint: new Set() };
   for (const s of statements) {
-    assert.doesNotMatch(s, /\b(drop (table|column|index|schema)|rename|alter column|truncate|delete from|update public)\b/i, 'not additive: ' + s);
+    assert.doesNotMatch(s, /\b(drop (table|column|index|schema|function)|rename|alter column|truncate|delete from|update public)\b/i, 'not additive: ' + s);
     if (/^create table/i.test(s)) assert.match(s, /^create table if not exists/i, s);
     if (/^create (unique )?index/i.test(s)) assert.match(s, /if not exists/i, s);
     if (/add column/i.test(s)) assert.match(s, /add column if not exists/i, s);
     let m;
+    if ((m = /^drop trigger/i.exec(s))) assert.match(s, /^drop trigger if exists require_invited_email on auth\.users$/i, 'the sign-up gate is the only trigger that may be dropped and re-created: ' + s);
+    if ((m = /^create trigger/i.exec(s))) assert.match(s, /^create trigger require_invited_email before insert on auth\.users for each row execute function public\.require_invited_email\(\)$/i, s);
     if ((m = /^drop policy if exists "([^"]+)" on (\S+)/i.exec(s))) dropped.policy.add(m[2] + ' ' + m[1]);
     if ((m = /^create policy "([^"]+)" on (\S+)/i.exec(s))) assert.ok(dropped.policy.has(m[2] + ' ' + m[1]), 'drop policy if exists must come before: ' + s);
     if ((m = /drop constraint if exists (\S+)/i.exec(s))) dropped.constraint.add(m[1]);
@@ -108,7 +112,7 @@ test('schema.sql can be run again safely and only adds things', () => {
 });
 
 test('every table has row-level security and an own-rows policy', () => {
-  for (const t of Object.keys(schema)) {
+  for (const t of Object.keys(schema).filter(t => t !== 'allowed_emails')) {
     assert.match(SQL, new RegExp('alter table public\\.' + t + ' enable row level security'), t + ' needs row level security');
     assert.match(SQL, new RegExp('create policy "[^"]+" on public\\.' + t + '\\s+for all to authenticated\\s+using \\(user_id = \\(select auth\\.uid\\(\\)\\)\\)\\s+with check \\(user_id = \\(select auth\\.uid\\(\\)\\)\\)'), t + ' needs an own-rows policy');
     assert.equal(schema[t].columns.user_id.default.fn, 'uid', t + '.user_id should default to auth.uid()');
@@ -129,4 +133,59 @@ test('only api/_lib/supabase.js talks to the database, and it exports nothing un
   assert.doesNotMatch(read('config.js'), /sb_secret_/, 'config.js is public; never put the secret key there');
   const key = /supabaseAnonKey:\s*"([^"]+)"/.exec(read('config.js'));
   if (key && key[1].split('.').length === 3) assert.equal(JSON.parse(Buffer.from(key[1].split('.')[1], 'base64url')).role, 'anon', 'config.js must hold the anon key');
+});
+
+test('the currency list is the same on every table that carries money (and the default is INR)', () => {
+  const list = ['INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'];
+  for (const t of CURRENCY_TABLES) {
+    assert.deepEqual(schema[t].checks.currency.values, list, t + '.currency check');
+    assert.equal(schema[t].columns.currency.default.value, 'INR', t + '.currency should default to INR so existing rows stay rupees');
+    assert.ok(schema[t].columns.currency.notNull, t + '.currency should be not null');
+  }
+  assert.deepEqual(schema.settings.checks.default_currency.values, list);
+  assert.ok(!schema.milestones.columns.currency, 'milestones use their project\'s currency; they don\'t store one');
+  // TODO(step 2 / step 3): also compare with CURRENCIES in api/_lib/ledger.js and index.html.
+});
+
+test('regional settings default to what the app assumed before: rupees, April, India time', () => {
+  const c = schema.settings.columns;
+  assert.equal(c.default_currency.default.value, 'INR');
+  assert.equal(c.fy_start_month.default.value, 4);
+  assert.equal(c.timezone.default.value, 'Asia/Kolkata');
+  assert.equal(c.locale.default.value, 'en-IN');
+  assert.deepEqual(schema.settings.checks.fy_start_month.values, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(schema.settings.checks.locale.values, ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA']);
+});
+
+test('sample clients are flagged, and nobody is a sample by default', () => {
+  assert.equal(schema.clients.columns.is_sample.default.value, false);
+  assert.ok(schema.clients.columns.is_sample.notNull);
+});
+
+test('allowed_emails: row-level security on, no policies, and a sign-up gate on auth.users', () => {
+  const t = schema.allowed_emails;
+  assert.deepEqual(Object.keys(t.columns), ['email', 'note', 'created_at']);
+  assert.match(SQL, /alter table public\.allowed_emails enable row level security/);
+  assert.doesNotMatch(SQL, /create policy "[^"]+" on public\.allowed_emails/, 'allowed_emails must have no policies, so only the owner can read or change it');
+  assert.doesNotMatch(SQL, /grant [^;]*allowed_emails/i);
+  const fn = /create or replace function public\.require_invited_email\(\)([\s\S]*?)\$\$([\s\S]*?)\$\$;/.exec(SQL);
+  assert.ok(fn, 'the gate function is missing');
+  assert.match(fn[1], /returns trigger/);
+  assert.match(fn[1], /security definer set search_path = public/, 'the function must be security definer with a fixed search_path');
+  assert.match(fn[2], /lower\(email\) = lower\(new\.email\)/, 'emails are compared case-insensitively');
+  assert.match(fn[2], /raise exception/);
+  assert.match(SQL, /revoke execute on function public\.require_invited_email\(\) from public, anon, authenticated/);
+  assert.match(SQL, /create trigger require_invited_email before insert on auth\.users\s+for each row execute function public\.require_invited_email\(\)/);
+});
+
+test('the seed has rupee rows by default, a USD side on request, and the other user in the US', () => {
+  const { Store } = require('./helpers/store');
+  const { seed, seedUsd, ids, OWNER, OTHER } = require('./helpers/seed');
+  const store = seed(new Store(schema));
+  for (const t of CURRENCY_TABLES) assert.ok(store.rows[t].filter(r => r.user_id === OWNER).every(r => r.currency === 'INR'), t + ': the owner\'s seed rows should be INR');
+  assert.deepEqual(store.select('settings', r => r.user_id === OWNER).map(r => [r.default_currency, r.fy_start_month, r.timezone, r.locale]), [['INR', 4, 'Asia/Kolkata', 'en-IN']]);
+  assert.deepEqual(store.select('settings', r => r.user_id === OTHER).map(r => [r.default_currency, r.fy_start_month, r.timezone]), [['USD', 1, 'America/New_York']]);
+  assert.ok(store.rows.projects.find(r => r.id === ids.otherProject).currency === 'USD');
+  seedUsd(store);
+  for (const t of CURRENCY_TABLES) assert.ok(store.rows[t].some(r => r.user_id === OWNER && r.currency === 'USD'), t + ' should have a USD row after seedUsd');
 });

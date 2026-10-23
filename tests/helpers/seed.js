@@ -19,6 +19,10 @@
 //   Tasks on GeekBoz Website: "Send design for approval" due 20 Oct (overdue), "Set up hosting" due 27 Oct (this week),
 //                             "Write launch email" (no date), "Buy the domain" (done). Edustudy Website has none.
 //   Time on GeekBoz Website: 5h on 5 Oct + 1h 30m on 10 Oct = 6h 30m (390 minutes); 20,000 received = 3,076.92 earned per hour
+//   Currency: every row above is INR (the column default). seedUsd(store) adds a USD side for the owner, for the tests of
+//   mixed currencies: client "Brightwave" (US), project "Brand site" quoted USD 3,000, USD 1,000 received (Advance, 3 Oct),
+//   USD 120 spent (Fonts, 4 Oct), invoice INV/2026-27/004 for USD 1,000 (sent, paid by the Advance), and a USD 12/yr domain renewal.
+//   The OTHER user is in the US: USD, January financial year, New York time (their rows are USD and never show up for the owner).
 const { mock } = require('node:test');
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
@@ -62,7 +66,13 @@ const ids = {
   otherTask: '88888888-0000-4000-8000-000000000005',
   timeDesign: '77777777-0000-4000-8000-000000000001',
   timeRevisions: '77777777-0000-4000-8000-000000000002',
-  otherTime: '77777777-0000-4000-8000-000000000003'
+  otherTime: '77777777-0000-4000-8000-000000000003',
+  usdClient: 'aaaaaaaa-0000-4000-8000-000000000003',
+  usdProject: 'bbbbbbbb-0000-4000-8000-000000000004',
+  usdAdvance: 'cccccccc-0000-4000-8000-000000000006',
+  usdFonts: 'cccccccc-0000-4000-8000-000000000007',
+  usdInvoice: 'ffffffff-0000-4000-8000-000000000007',
+  usdService: '99999999-0000-4000-8000-000000000006'
 };
 
 function seed(store) {
@@ -110,15 +120,31 @@ function seed(store) {
   time(ids.timeDesign, ids.gbSite, '2026-10-05', 300, 'Homepage design');
   time(ids.timeRevisions, ids.gbSite, '2026-10-10', 90, 'Revisions');
   // Someone else's data in the same database, which must never show up or change.
-  c(ids.otherClient, 'GeekBoz', { contact: 'not yours' }, OTHER);
-  p(ids.otherProject, ids.otherClient, 'Website', { quoted: 99999 }, OTHER);
-  t(ids.otherTxn, ids.otherClient, ids.otherProject, 'in', 77777, { note: 'Advance', date: '2026-10-10' }, OTHER);
+  const usd = { currency: 'USD' };
+  c(ids.otherClient, 'GeekBoz', { contact: 'not yours', is_sample: true }, OTHER);
+  p(ids.otherProject, ids.otherClient, 'Website', { quoted: 99999, ...usd }, OTHER);
+  t(ids.otherTxn, ids.otherClient, ids.otherProject, 'in', 77777, { note: 'Advance', date: '2026-10-10', ...usd }, OTHER);
   m(ids.otherMs, ids.otherProject, 'Theirs', 99999, '2026-01-01', 0, OTHER);
-  store.insert('settings', { business_name: 'Not yours', upi_id: 'other@ybl' }, OTHER);
+  store.insert('settings', { business_name: 'Not yours', upi_id: 'other@ybl', default_currency: 'USD', fy_start_month: 1, timezone: 'America/New_York', locale: 'en-US' }, OTHER);
   task(ids.otherTask, ids.otherProject, 'Theirs', { due_date: '2026-10-01' }, OTHER);
   time(ids.otherTime, ids.otherProject, '2026-10-10', 600, 'Theirs', OTHER);
-  svc(ids.otherSvc, ids.otherClient, ids.otherProject, 'domain', 'geekboz.in', 1, 99999, 'yearly', '2026-10-24', {}, OTHER);
-  inv(ids.otherInv, ids.otherClient, ids.otherProject, null, 'INV/2026-27/001', '2026-10-01', '2026-10-08', [{ description: 'Theirs', quantity: 1, rate: 99999 }], 'sent', {}, OTHER);
+  svc(ids.otherSvc, ids.otherClient, ids.otherProject, 'domain', 'geekboz.in', 1, 99999, 'yearly', '2026-10-24', usd, OTHER);
+  inv(ids.otherInv, ids.otherClient, ids.otherProject, null, 'INV/2026-27/001', '2026-10-01', '2026-10-08', [{ description: 'Theirs', quantity: 1, rate: 99999 }], 'sent', usd, OTHER);
+  return store;
+}
+
+// A USD client, project, payments, invoice and renewal for the owner, for tests of more than one currency.
+// Kept out of seed() so the INR numbers above (and every test built on them) stay as they are.
+function seedUsd(store, uid = OWNER) {
+  const usd = { currency: 'USD' };
+  store.insert('clients', { id: ids.usdClient, name: 'Brightwave', contact: 'hi@brightwave.com', sort_order: 2 }, uid);
+  store.insert('projects', { id: ids.usdProject, client_id: ids.usdClient, name: 'Brand site', status: 'active', quoted: 3000, ...usd }, uid);
+  store.insert('txns', { id: ids.usdAdvance, client_id: ids.usdClient, project_id: ids.usdProject, type: 'in', amount: 1000, note: 'Advance', date: '2026-10-03', ...usd }, uid);
+  store.insert('txns', { id: ids.usdFonts, client_id: ids.usdClient, project_id: ids.usdProject, type: 'out', amount: 120, note: 'Fonts', category: 'Software & plugins', date: '2026-10-04', ...usd }, uid);
+  store.insert('invoices', { id: ids.usdInvoice, client_id: ids.usdClient, project_id: ids.usdProject, number: 'INV/2026-27/004', issue_date: '2026-10-01', due_date: '2026-10-08',
+    items: [{ description: 'Brand site — advance', quantity: 1, rate: 1000 }], total: 1000, status: 'sent', ...usd }, uid);
+  store.update('txns', r => r.id === ids.usdAdvance, { invoice_id: ids.usdInvoice });
+  store.insert('services', { id: ids.usdService, client_id: ids.usdClient, project_id: ids.usdProject, kind: 'domain', name: 'brightwave.com', cost: 12, price: 20, cycle: 'yearly', next_renewal: '2027-02-01', ...usd }, uid);
   return store;
 }
 
@@ -127,4 +153,4 @@ function freezeTime(t, at = NOW) {
   t.mock.timers.enable({ apis: ['Date'], now: at });
 }
 
-module.exports = { seed, ids, OWNER, OTHER, NOW, freezeTime, mock };
+module.exports = { seed, seedUsd, ids, OWNER, OTHER, NOW, freezeTime, mock };
