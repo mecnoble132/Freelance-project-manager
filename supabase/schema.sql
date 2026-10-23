@@ -180,7 +180,34 @@ create policy "own invoices" on public.invoices
 alter table public.txns add column if not exists invoice_id uuid references public.invoices(id) on delete set null;
 create index if not exists txns_invoice_idx on public.txns (invoice_id);
 
+-- Renewals and retainers (added later): domains, hosting and care plans you pay for and charge clients for, on a cycle.
+create table if not exists public.services (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  client_id uuid not null references public.clients(id) on delete cascade,
+  project_id uuid references public.projects(id) on delete set null,
+  kind text not null default 'other' check (kind in ('domain', 'hosting', 'ssl', 'maintenance', 'email', 'other')),
+  name text not null,
+  provider text not null default '',
+  cost numeric(12, 2) not null default 0 check (cost >= 0),
+  price numeric(12, 2) not null default 0 check (price >= 0),
+  cycle text not null default 'yearly' check (cycle in ('monthly', 'quarterly', 'yearly')),
+  next_renewal date not null,
+  auto_renew boolean not null default false,
+  active boolean not null default true,
+  notes text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists services_user_idx on public.services (user_id);
+create index if not exists services_client_idx on public.services (client_id);
+alter table public.services enable row level security;
+drop policy if exists "own services" on public.services;
+create policy "own services" on public.services
+  for all to authenticated
+  using (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
 -- Every table the MCP server can change must be in this list, or its changes can't be logged and undone.
 alter table public.activity_log drop constraint if exists activity_log_table_name_check;
 alter table public.activity_log add constraint activity_log_table_name_check
-  check (table_name in ('clients', 'projects', 'txns', 'milestones', 'settings', 'invoices'));
+  check (table_name in ('clients', 'projects', 'txns', 'milestones', 'settings', 'invoices', 'services'));

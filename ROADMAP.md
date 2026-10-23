@@ -7,7 +7,7 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 | A | Financial year view (the automated tests are done) | Released |
 | B | Payment milestones | Released |
 | C | Invoices (UPI QR) and chasing payments, without GST or TDS for now | Released |
-| D | Renewals and retainers | Not started |
+| D | Renewals and retainers | Released |
 | E | Leads and quotes | Not started |
 | F | Tasks and time | Not started |
 
@@ -140,6 +140,8 @@ The automated tests are already done (`tests/`). This phase is the financial yea
 - **Check**: the WhatsApp link text (open it, don't send); mark as reminded; the prompts appear in Claude.
 
 ### D. Renewals and retainers
+
+> **As built (Oct 2026):** Renewals has its own page (`#/renewals`) but no tab, keeping to one new tab; it's reached from the dashboard's Renewals card. A monthly cycle from the 31st lands on the month's last day and stays there (31 Jan → 28 Feb → 28 Mar). Renew's expense category comes from the kind (domain → Domain, hosting → Hosting, SSL and email → Software & plugins, else Other), and a step is skipped when its amount is ₹0. There's no delete tool for services in Claude: stop one with `active: false`.
 
 - **DB**: `services` table:
   - `client_id`, `project_id`

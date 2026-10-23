@@ -11,6 +11,11 @@
 //     INV/2026-27/003 Edustudy (no project) 2,500 in two lines: draft
 //     INV/2025-26/001 Edustudy Website 15,000: paid by the Final payment (last financial year)
 //     INV/2025-26/002 Edustudy 5,000: cancelled
+//   Services (renewals): geekboz.in domain, cost 800 / price 1,500 yearly, renews 5 Nov (in 13 days)
+//                        Hostinger Business hosting, 3,000 / 6,000 yearly, was due 20 Oct (overdue)
+//                        Edustudy monthly care plan, 0 / 2,000 monthly, renews 1 Dec
+//                        Edustudy Google Workspace, stopped (inactive)
+//     yearly from active ones: revenue 31,500, cost 3,800, profit 27,700
 const { mock } = require('node:test');
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
@@ -41,7 +46,12 @@ const ids = {
   invDraft: 'ffffffff-0000-4000-8000-000000000003',
   invOld: 'ffffffff-0000-4000-8000-000000000004',
   invCancelled: 'ffffffff-0000-4000-8000-000000000005',
-  otherInv: 'ffffffff-0000-4000-8000-000000000006'
+  otherInv: 'ffffffff-0000-4000-8000-000000000006',
+  svcDomain: '99999999-0000-4000-8000-000000000001',
+  svcHosting: '99999999-0000-4000-8000-000000000002',
+  svcCare: '99999999-0000-4000-8000-000000000003',
+  svcStopped: '99999999-0000-4000-8000-000000000004',
+  otherSvc: '99999999-0000-4000-8000-000000000005'
 };
 
 function seed(store) {
@@ -74,12 +84,19 @@ function seed(store) {
   inv(ids.invCancelled, ids.edustudy, null, null, 'INV/2025-26/002', '2026-03-20', '2026-03-27', [{ description: 'Extra pages', quantity: 1, rate: 5000 }], 'cancelled');
   store.update('txns', r => r.id === ids.advance, { invoice_id: ids.invAdvance });
   store.update('txns', r => r.id === ids.eduFinal, { invoice_id: ids.invOld });
+  const svc = (id, client_id, project_id, kind, name, cost, price, cycle, next_renewal, extra = {}, uid = OWNER) =>
+    store.insert('services', { id, client_id, project_id, kind, name, cost, price, cycle, next_renewal, ...extra }, uid);
+  svc(ids.svcDomain, ids.geekboz, ids.gbSite, 'domain', 'geekboz.in', 800, 1500, 'yearly', '2026-11-05', { provider: 'GoDaddy' });
+  svc(ids.svcHosting, ids.geekboz, ids.gbSite, 'hosting', 'Hostinger Business', 3000, 6000, 'yearly', '2026-10-20', { provider: 'Hostinger', auto_renew: true });
+  svc(ids.svcCare, ids.edustudy, ids.eduSite, 'maintenance', 'Monthly care plan', 0, 2000, 'monthly', '2026-12-01');
+  svc(ids.svcStopped, ids.edustudy, null, 'email', 'Google Workspace', 1500, 2000, 'yearly', '2026-10-25', { active: false });
   // Someone else's data in the same database, which must never show up or change.
   c(ids.otherClient, 'GeekBoz', { contact: 'not yours' }, OTHER);
   p(ids.otherProject, ids.otherClient, 'Website', { quoted: 99999 }, OTHER);
   t(ids.otherTxn, ids.otherClient, ids.otherProject, 'in', 77777, { note: 'Advance', date: '2026-10-10' }, OTHER);
   m(ids.otherMs, ids.otherProject, 'Theirs', 99999, '2026-01-01', 0, OTHER);
   store.insert('settings', { business_name: 'Not yours', upi_id: 'other@ybl' }, OTHER);
+  svc(ids.otherSvc, ids.otherClient, ids.otherProject, 'domain', 'geekboz.in', 1, 99999, 'yearly', '2026-10-24', {}, OTHER);
   inv(ids.otherInv, ids.otherClient, ids.otherProject, null, 'INV/2026-27/001', '2026-10-01', '2026-10-08', [{ description: 'Theirs', quantity: 1, rate: 99999 }], 'sent', {}, OTHER);
   return store;
 }

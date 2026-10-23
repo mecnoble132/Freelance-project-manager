@@ -225,6 +225,16 @@ textarea{resize:vertical;min-height:90px}
 .bcard .state:not(.overdue){background:var(--panel)}
 .bempty{color:var(--muted);font-size:13px;text-align:center;padding:18px 6px;border:1px dashed var(--line);border-radius:10px}
 .view-pills button{padding:6px 12px}
+.svcrow{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line);min-width:0}
+.svcrow:last-child{border-bottom:none}
+.sub.out{color:var(--out)}
+.svcrow .grow{background:none;border:none;color:inherit;font:inherit;text-align:left;cursor:pointer;padding:0}
+.svcrow .right{flex-shrink:0}
+.renew-steps{margin:0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.renew-steps label{display:flex;gap:10px;align-items:flex-start;font-size:14px}
+.renew-steps input{width:auto;margin-top:3px}
+.check{display:flex;gap:8px;align-items:center;font-size:14px}
+.check input{width:auto}
 /* Print (Save as PDF): just the invoice, in black on white, on one A4 page. */
 @media print{
   @page{size:A4;margin:12mm}
@@ -253,7 +263,7 @@ textarea{resize:vertical;min-height:90px}
 <script src="config.js"></script>
 <script>
 (function(){
-const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
+const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], services:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
   period:pref('period','this_fy'), pView:pref('projectView','list'), iView:pref('invoiceView','list'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
@@ -311,7 +321,7 @@ const msName = (i,n) => n===1 ? 'Full payment' : i===0 ? 'Advance' : i===n-1 ? '
 // ---------- routing ----------
 function parseHash(){ const parts=location.hash.replace(/^#\/?/,'').split('/'); const n=parts[0]||'home';
   if((n==='project'||n==='client'||n==='invoice') && parts[1]) return {name:n,id:decodeURIComponent(parts[1])};
-  return {name:['projects','clients','money','invoices'].includes(n)?n:'home'}; }
+  return {name:['projects','clients','money','invoices','renewals'].includes(n)?n:'home'}; }
 const hrefOf = v => v.name==='home' ? '#/' : '#/'+v.name+(v.id?'/'+encodeURIComponent(v.id):'');
 function go(v){ const href=hrefOf(v); if(location.hash===href) render(); else location.hash=href; }
 window.addEventListener('hashchange',()=>{ S.view=parseHash(); closeSheet(); render(); window.scrollTo(0,0); });
@@ -330,7 +340,7 @@ function render(){
   if(!S.session){ return renderLogin(v); }
   if(S.error){ v.appendChild(h('div',{class:'empty'},S.error)); return; }
   if(!S.ready){ v.appendChild(h('div',{class:'empty'},'Loading your projects and money…')); return; }
-  ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney,invoices:renderInvoices,invoice:renderInvoice})[S.view.name](v, S.view.id);
+  ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney,invoices:renderInvoices,invoice:renderInvoice,renewals:renderRenewals})[S.view.name](v, S.view.id);
 }
 
 // ---------- dashboard ----------
@@ -426,7 +436,7 @@ function renderHome(v){
   if(!rec.length) recCard.appendChild(h('div',{class:'empty'},'Every payment and expense you log shows up here.'));
   else recCard.appendChild(h('div',{class:'list'},rec.map(t=>txRow(t,true))));
 
-  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(),owedCard,topCard,spendCard)));
+  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(),renewalsCard(),owedCard,topCard,spendCard)));
   drawMoneyChart(chartBox, buckets);
 }
 const periodLabel = p => (PERIODS.find(x=>x[0]===p)||[])[1];
@@ -656,6 +666,10 @@ function renderClient(v,id){
   if(!ps.length) sec.appendChild(h('div',{class:'empty'},'No projects for '+c.name+' yet.'));
   else sec.appendChild(h('div',{class:'pgrid'},ps.map(projectCard)));
   v.appendChild(sec);
+  const svcs=sortServices(S.services.filter(x=>x.clientId===id));
+  const ss=h('div',{class:'sec'},h('div',{class:'sec-head'},h('h2',null,'Services'),canWrite()?h('button',{class:'btn small',type:'button',onclick:()=>openServiceSheet({clientId:id})},'+ Add service'):null));
+  ss.appendChild(svcs.length?h('div',{class:'list'},svcs.map(serviceRow)):h('div',{class:'empty'},'Nothing to renew for '+c.name+'. Add their domain, hosting or care plan to get reminded before it renews.'));
+  v.appendChild(ss);
   const rec=h('div',{class:'sec'},h('div',{class:'sec-head'},h('h2',null,'Money')));
   if(!tx.length) rec.appendChild(h('div',{class:'empty'},'No money logged for '+c.name+' yet.'));
   else rec.appendChild(h('div',{class:'list'},sortTx(tx).map(t=>txRow(t,false,true))));
@@ -844,8 +858,9 @@ function openClientSheet(c){
     if(editing) await api.update('clients',c.id,row);
     else { const id=await api.insert('clients',{...row, sort_order:S.clients.length}); go({name:'client',id}); }
   }, editing?'Save changes':'Add client', editing?{onDelete:()=>{
-    const np=S.projects.filter(p=>p.clientId===c.id).length, nt=S.txns.filter(t=>t.clientId===c.id).length, ni=S.invoices.filter(i=>i.clientId===c.id).length;
-    confirmSheet('Delete '+c.name+'?', 'This also deletes their '+np+(np===1?' project':' projects')+', '+nt+(nt===1?' money entry':' money entries')+(ni?' and '+ni+(ni===1?' invoice':' invoices'):'')+'. It can’t be undone.', 'Delete client and everything', async()=>{ await api.del('clients',c.id); go({name:'clients'}); });
+    const np=S.projects.filter(p=>p.clientId===c.id).length, nt=S.txns.filter(t=>t.clientId===c.id).length, ni=S.invoices.filter(i=>i.clientId===c.id).length, ns=S.services.filter(x=>x.clientId===c.id).length;
+    const more=[ni?ni+(ni===1?' invoice':' invoices'):null, ns?ns+(ns===1?' service':' services'):null].filter(Boolean);
+    confirmSheet('Delete '+c.name+'?', 'This also deletes their '+np+(np===1?' project':' projects')+(more.length?', ':' and ')+nt+(nt===1?' money entry':' money entries')+(more.length?(more.length===2?', '+more[0]+' and '+more[1]:' and '+more[0]):'')+'. It can’t be undone.', 'Delete client and everything', async()=>{ await api.del('clients',c.id); go({name:'clients'}); });
   }, deleteLabel:'Delete client'}:{});
 }
 
@@ -1157,6 +1172,117 @@ function openReminderSheet(inv){
   ], async ()=>{ await api.update('invoices',inv.id,{last_reminded:today(), reminder_count:(inv.reminderCount||0)+1}); }, 'Mark as reminded', {noFocus:true});
 }
 
+// ---------- renewals ----------
+// A cycle moves the date by whole months, landing on the last day of shorter months (same as ledger.js).
+const CYCLES = [['monthly','Monthly',1],['quarterly','Every 3 months',3],['yearly','Yearly',12]];
+const cycleMonths = c => (CYCLES.find(x=>x[0]===c)||CYCLES[2])[2];
+const KINDS = [['domain','Domain','Domain'],['hosting','Hosting','Hosting'],['ssl','SSL','Software & plugins'],['maintenance','Maintenance','Other'],['email','Email','Software & plugins'],['other','Other','Other']];
+const kindOf = k => KINDS.find(x=>x[0]===k)||KINDS[5];
+function addMonths(d,n){ const y=Number(d.slice(0,4)), m=Number(d.slice(5,7))-1+n, day=Number(d.slice(8,10)); const last=new Date(y,m+1,0).getDate(); return ymd(new Date(y,m,Math.min(day,last))); }
+const sortServices = arr => arr.slice().sort((a,b)=>(b.active-a.active)||a.nextRenewal.localeCompare(b.nextRenewal));
+const yearly = x => 12/cycleMonths(x.cycle);
+function serviceWhen(x){
+  if(!x.active) return 'Stopped';
+  const d=-daysSince(x.nextRenewal);
+  return d<0 ? 'Was due '+fmtDate(x.nextRenewal)+' · '+(-d)+(d===-1?' day':' days')+' overdue' : d===0 ? 'Renews today' : 'Renews '+fmtDate(x.nextRenewal)+' · in '+d+(d===1?' day':' days');
+}
+function serviceRow(x, showClient){
+  const overdue=x.active && x.nextRenewal<today();
+  return h('div',{class:'svcrow'},
+    h(canWrite()?'button':'div',{class:'grow',type:canWrite()?'button':null,'aria-label':canWrite()?'Edit '+x.name:null,onclick:canWrite()?()=>openServiceSheet({service:x}):null},
+      h('div',{class:'title'},x.name),
+      h('div',{class:'sub'},[showClient?clientName(x.clientId):null, kindOf(x.kind)[1], rs(x.price)+' '+(CYCLES.find(c=>c[0]===x.cycle)||CYCLES[2])[1].toLowerCase()].filter(Boolean).join(' · ')),
+      h('div',{class:'sub'+(overdue?' out':'')},serviceWhen(x))),
+    canWrite()&&x.active?h('button',{class:'btn small'+(overdue?' primary':''),type:'button',onclick:()=>openRenewSheet(x)},'Renew'):null);
+}
+// Renewals in the next 30 days (and overdue ones) on the dashboard.
+function renewalsCard(){
+  const soon=addDays(today(),30), due=sortServices(S.services.filter(x=>x.active && x.nextRenewal<=soon));
+  const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Renewals'),h('a',{class:'back',href:'#/renewals',style:'font-size:13px'},'See all →')));
+  if(!S.services.length) card.appendChild(h('div',{class:'empty'},'Track the domains, hosting and care plans you renew for clients, and see them here before they’re due.'));
+  else if(!due.length) card.appendChild(h('div',{class:'empty'},'Nothing renews in the next 30 days.'));
+  else card.appendChild(h('div',{class:'list'},due.map(x=>serviceRow(x,true))));
+  return card;
+}
+function renderRenewals(v){
+  const act=S.services.filter(x=>x.active), rev=act.reduce((a,x)=>a+x.price*yearly(x),0), cost=act.reduce((a,x)=>a+x.cost*yearly(x),0);
+  const soon=addDays(today(),30), due=act.filter(x=>x.nextRenewal<=soon);
+  add(v,
+    h('a',{class:'back',href:'#/'},'← Dashboard'),
+    h('div',{class:'page-head'},h('h1',null,'Renewals'),canWrite()?h('button',{class:'btn primary',type:'button',onclick:()=>openServiceSheet()},'+ Add service'):null),
+    h('div',{class:'kpis'},
+      kpi('Yearly revenue',rs(rev),act.length+(act.length===1?' active service':' active services'),'in'),
+      kpi('Yearly cost',rs(cost),'What you pay providers','out'),
+      kpi('Yearly profit',signed(rev-cost),rev>0?Math.round((rev-cost)/rev*100)+'% margin':'From renewals',rev-cost<0?'out':''),
+      kpi('Due in 30 days',String(due.length),due.filter(x=>x.nextRenewal<today()).length+' overdue')));
+  if(!S.services.length){ v.appendChild(h('div',{class:'empty'},'No services yet. Add a client’s domain, hosting, SSL or care plan with what it costs you and what you charge, and Renew logs the cost, invoices the client and moves the date on.')); return; }
+  const list=sortServices(S.services);
+  v.appendChild(h('div',{class:'card'},h('div',{class:'list'},list.map(x=>serviceRow(x,true)))));
+}
+
+function openServiceSheet(pre={}){
+  const x=pre.service, editing=!!x;
+  const client=clientPicker('v-client', x?x.clientId:pre.clientId);
+  const pSel=h('select',{id:'v-project'});
+  const fillProjects=()=>{ pSel.textContent=''; pSel.appendChild(h('option',{value:''},'No project'));
+    if(client.sel.value!==NEW) sortProjects(S.projects.filter(p=>p.clientId===client.sel.value)).forEach(p=>pSel.appendChild(h('option',{value:p.id},p.name)));
+    const want=x?x.projectId:pre.projectId; pSel.value = want && [...pSel.options].some(o=>o.value===want) ? want : ''; };
+  client.sel.addEventListener('change',fillProjects); fillProjects();
+  const kind=h('select',{id:'v-kind'},KINDS.map(([k,l])=>h('option',{value:k},l))); kind.value=x?x.kind:'domain';
+  const name=h('input',{id:'v-name',placeholder:'e.g. bakery.in or Hostinger Business',value:x?x.name:''});
+  const provider=h('input',{id:'v-provider',placeholder:'e.g. GoDaddy, Hostinger',value:x?x.provider:''});
+  const cost=h('input',{id:'v-cost',type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'0',value:x&&x.cost?x.cost:''});
+  const price=h('input',{id:'v-price',type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'0',value:x&&x.price?x.price:''});
+  const cycle=h('select',{id:'v-cycle'},CYCLES.map(([k,l])=>h('option',{value:k},l))); cycle.value=x?x.cycle:'yearly';
+  const next=h('input',{id:'v-next',type:'date',value:x?x.nextRenewal:''});
+  const auto=h('input',{id:'v-auto',type:'checkbox'}); auto.checked=x?x.autoRenew:false;
+  const active=h('input',{id:'v-active',type:'checkbox'}); active.checked=x?x.active:true;
+  const notes=h('textarea',{id:'v-notes',placeholder:'e.g. where the login is kept (never the password itself)'}); notes.value=x?x.notes:'';
+  sheet(editing?'Edit '+x.name:'Add a service',[
+    h('div',{class:'two'},h('div',{class:'field'},h('label',{for:'v-client'},'Client'),client.sel,client.box),field('v-project','Project',pSel)),
+    h('div',{class:'two'},field('v-kind','Kind',kind),field('v-name','Name',name)),
+    field('v-provider','Provider',provider),
+    h('div',{class:'two'},field('v-cost','It costs you (₹)',cost,'Each cycle'),field('v-price','You charge (₹)',price,'Each cycle')),
+    h('div',{class:'two'},field('v-cycle','Renews',cycle),field('v-next','Next renewal',next)),
+    h('label',{class:'check'},auto,'Renews automatically with the provider'),
+    editing?h('label',{class:'check'},active,'Still active (untick to stop tracking it)'):null,
+    field('v-notes','Notes',notes)
+  ], async ()=>{
+    const n=name.value.trim(); if(!n) return fail('Give the service a name.');
+    if(!next.value) return fail('Pick the next renewal date.');
+    const c=cost.value===''?0:Number(cost.value), pr=price.value===''?0:Number(price.value);
+    if(!(c>=0) || !(pr>=0)) return fail('Amounts can’t be negative.');
+    const cid=await client.resolve(); if(!cid) return false;
+    const row={client_id:cid, project_id:pSel.value||null, kind:kind.value, name:n, provider:provider.value.trim(), cost:c, price:pr, cycle:cycle.value, next_renewal:next.value, auto_renew:auto.checked, active:editing?active.checked:true, notes:notes.value.trim()};
+    if(editing) await api.update('services',x.id,row); else await api.insert('services',row);
+  }, editing?'Save changes':'Add service', editing?{onDelete:()=>confirmSheet('Delete '+x.name+'?','Its past expenses and invoices stay. To keep it on record instead, untick Still active.','Delete service',async()=>{ await api.del('services',x.id); }), deleteLabel:'Delete service'}:{});
+}
+
+// Shows what Renew will do, with each step optional, then does it: invoice the client, log the cost, move the date.
+function openRenewSheet(x){
+  const b=biz(), t=today(), next=addMonths(x.nextRenewal,cycleMonths(x.cycle)), number=nextInvoiceNumber(b.invoicePrefix,t), client=clientName(x.clientId);
+  const period=fmtDate(x.nextRenewal)+' to '+fmtDate(addDays(next,-1));
+  const doExp=h('input',{type:'checkbox',id:'rn-exp'}); doExp.checked=x.cost>0;
+  const doInv=h('input',{type:'checkbox',id:'rn-inv'}); doInv.checked=x.price>0;
+  const step=(box,txt,ok)=>h('li',null,h('label',null,box,h('span',null,txt)));
+  if(!(x.cost>0)) doExp.disabled=true;
+  if(!(x.price>0)) doInv.disabled=true;
+  sheet('Renew '+x.name,[
+    h('p',{class:'muted',style:'margin:0'},client+' · '+kindOf(x.kind)[1]+' · '+period),
+    h('ul',{class:'renew-steps'},
+      step(doExp, x.cost>0 ? 'Log '+rs(x.cost)+' spent on '+x.name+' ('+kindOf(x.kind)[2]+')' : 'No cost to log'),
+      step(doInv, x.price>0 ? 'Create draft invoice '+number+' to '+client+' for '+rs(x.price) : 'No price to invoice'),
+      h('li',null,h('label',null,h('input',{type:'checkbox',checked:true,disabled:true}),h('span',null,'Move the next renewal from '+fmtDate(x.nextRenewal)+' to '+fmtDate(next))))),
+  ], async ()=>{
+    let invId=null;
+    if(doInv.checked) invId=await api.insert('invoices',{client_id:x.clientId, project_id:x.projectId, milestone_id:null, number, issue_date:t, due_date:addDays(t,b.paymentTermsDays),
+      items:[{description:x.name+' — '+x.kind+' renewal ('+period+')', quantity:1, rate:x.price}], total:x.price, status:'draft', notes:b.invoiceNotes});
+    if(doExp.checked) await api.insert('txns',{client_id:x.clientId, project_id:x.projectId, type:'out', amount:x.cost, category:kindOf(x.kind)[2], note:x.name+' renewal', date:t});
+    await api.update('services',x.id,{next_renewal:next});
+    if(invId) go({name:'invoice',id:invId});
+  }, 'Renew', {noFocus:true});
+}
+
 // ---------- login ----------
 function renderLogin(v){
   const email=h('input',{id:'l-email',type:'email',autocomplete:'email',required:true,placeholder:'you@example.com'});
@@ -1189,8 +1315,8 @@ function renderLogin(v){
 const cfg = window.LEDGER_CONFIG || {};
 const sb = (window.supabase && cfg.supabaseUrl && cfg.supabaseAnonKey) ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey) : null;
 const ms = t => t ? Date.parse(t) : 0;
-const TABLES = ['clients','projects','txns','milestones','invoices','settings'];
-const OPTIONAL = ['milestones','invoices','settings']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
+const TABLES = ['clients','projects','txns','milestones','invoices','settings','services'];
+const OPTIONAL = ['milestones','invoices','settings','services']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
 // Columns added for the dashboard default to empty, so the app still loads before supabase/schema.sql is re-run.
 const map = {
   clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
@@ -1202,7 +1328,9 @@ const map = {
     total:Number(r.total)||0, status:r.status||'draft', notes:r.notes||'', sentAt:r.sent_at||null, lastReminded:r.last_reminded||null, reminderCount:r.reminder_count||0, createdAt:ms(r.created_at),
     items:(Array.isArray(r.items)?r.items:[]).map(i=>({description:i.description||'', quantity:Number(i.quantity)||0, rate:Number(i.rate)||0})) }),
   settings: r => ({ id:r.id, businessName:r.business_name||'', address:r.address||'', phone:r.phone||'', email:r.email||'', upiId:r.upi_id||'', bankDetails:r.bank_details||'',
-    invoicePrefix:r.invoice_prefix||'INV', paymentTermsDays:r.payment_terms_days??7, invoiceNotes:r.invoice_notes||'' })
+    invoicePrefix:r.invoice_prefix||'INV', paymentTermsDays:r.payment_terms_days??7, invoiceNotes:r.invoice_notes||'' }),
+  services: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, kind:r.kind||'other', name:r.name||'', provider:r.provider||'', cost:Number(r.cost)||0, price:Number(r.price)||0,
+    cycle:r.cycle||'yearly', nextRenewal:r.next_renewal, autoRenew:!!r.auto_renew, active:r.active!==false, notes:r.notes||'', createdAt:ms(r.created_at) })
 };
 async function load(){
   const res = await Promise.all(TABLES.map(t=>sb.from(t).select('*')));
@@ -1241,7 +1369,7 @@ if(!sb){
     S.authReady=true; S.session=session;
     if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
     if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
-    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.ready=false; closeSheet(); render(); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.ready=false; closeSheet(); render(); }
   });
 }
 })();
