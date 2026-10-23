@@ -1,8 +1,9 @@
 {
   "name": "client-ledger-website-tests",
   "private": true,
-  "description": "Playwright for the website tests. Only needed to run tests/e2e; the app itself has no dependencies.",
+  "description": "Playwright for the website tests, and the QR code library the site loads from its CDN (served from here so the tests run offline). Only needed to run tests/e2e; the app itself has no dependencies.",
   "devDependencies": {
-    "playwright": "1.56.1"
+    "playwright": "1.56.1",
+    "qrcode-generator": "1.4.4"
   }
 }

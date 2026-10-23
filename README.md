@@ -13,6 +13,9 @@ My personal web app for running my website development service: every client, ev
 - **Project page**: all of the above plus start and due dates and every payment and expense on it
 - **Payment milestones**: split a project's price into stages (quick 50/50 or 50/30/20 splits, or your own), each with a due date. The last milestone fills in the rest of the quote and updates as you type the others. Payments cover them in order, so each shows as paid, part paid, not paid yet or overdue, and projects with an overdue milestone show "₹X overdue"
 - **Clients**: each client's projects, revenue, profit, contact and notes. A new client can be added on its own or while creating a project
+- **Invoices**: numbered invoices (INV/2026-27/001, restarting each financial year) from line items or straight from a milestone, with your business details, a UPI QR code for the amount due, bank details, and Print / Save as PDF on one A4 page. Mark sent, record payments against them (part payments too), cancel. Paid, part paid and overdue are worked out from the payments. No GST or TDS yet
+- **Chasing payments**: "To collect on invoices" on the dashboard and the Invoices tab, grouped by client with days overdue. On an overdue invoice, Remind writes a message that gets firmer after 7 and 30 days, to copy or send on WhatsApp yourself, then Mark as reminded
+- **Your business details**: name, address, UPI ID, bank details, invoice prefix, payment terms and default notes, printed on invoices
 - **Money**: every payment (money in) and expense (money out, with a category like Domain or Hosting), filterable by type, period and text. Tap any entry to edit or delete it
 - Email and password sign-in, with password reset
 
@@ -24,8 +27,10 @@ A static site with no build step: `index.html` (HTML, CSS and plain JavaScript),
 |---|---|
 | `clients` | `name`, `contact`, `notes`, `sort_order` |
 | `projects` | `client_id`, `name`, `status`, `description`, `quoted` (₹), `preview_url`, `live_url`, `github_url`, `start_date`, `due_date` |
-| `txns` | `client_id`, `project_id`, `type` (`in` / `out`), `amount` (₹), `category`, `note`, `date` |
+| `txns` | `client_id`, `project_id`, `invoice_id`, `type` (`in` / `out`), `amount` (₹), `category`, `note`, `date` |
 | `milestones` | `project_id`, `name`, `amount` (₹), `due_date`, `sort_order` |
+| `invoices` | `client_id`, `project_id`, `milestone_id`, `number`, `issue_date`, `due_date`, `items` (description, quantity, rate), `total` (₹), `status` (`draft` / `sent` / `paid` / `cancelled`), `notes`, `sent_at`, `last_reminded`, `reminder_count` |
+| `settings` | One row: `business_name`, `address`, `phone`, `email`, `upi_id`, `bank_details`, `invoice_prefix`, `payment_terms_days`, `invoice_notes` |
 
 Every table also has `id`, `user_id` and `created_at`. Row-level security lets each signed-in user see and change only their own rows, and sign-ups are turned off, so my account is the only one.
 
@@ -53,6 +58,10 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 | `list_projects` / `get_project` | Projects with client, status, description, links, dates, money and milestones; one project's entries |
 | `list_clients` / `get_client` | Clients with totals; one client's projects and entries |
 | `list_transactions` | Payments and expenses, filtered by type, dates, client, project or category |
+| `list_invoices` / `get_invoice` | Invoices by state (open, overdue, draft, paid, cancelled); one invoice with its lines, payments and UPI link |
+| `list_overdue` | Overdue invoices grouped by client, with days overdue and the last reminder |
+| `draft_payment_reminder` | The facts for a reminder (amounts, days overdue, tone, WhatsApp number); Claude writes the message, nothing is sent |
+| `get_settings` | Your business details and invoice settings |
 | `list_recent_changes` | Changes made through the assistant, and whether they were undone |
 
 **Write tools**
@@ -62,9 +71,14 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 | `create_client` / `update_client` / `delete_client` | Add, edit or delete a client (deleting also removes their projects and money) |
 | `create_project` / `update_project` / `delete_project` | Add a project (with a new client if needed), change any field or move it to another client, or delete it |
 | `set_milestones` | Replace a project's payment milestones, from a split like `[50, 30, 20]` or a list with amounts and due dates |
-| `add_payment` / `add_expense` / `add_transactions` | Log money in or out, one at a time or many at once |
+| `add_payment` / `add_expense` / `add_transactions` | Log money in or out, one at a time or many at once. A payment can be for an invoice |
+| `create_invoice` / `update_invoice` | Invoice a milestone or line items; mark sent, edit, or cancel (never delete) |
+| `log_reminder` | Record that you reminded a client, so the next reminder is firmer |
+| `update_settings` | Change your business details, UPI ID, invoice prefix and payment terms |
 | `update_transaction` / `delete_transactions` | Fix or remove money entries |
 | `undo_change` | Revert the latest change, or any earlier one by its `change_id` |
+
+**Prompts**: `who_owes_me` and `weekly_review` show up in Claude as ready-made requests.
 
 **Safeguards**
 

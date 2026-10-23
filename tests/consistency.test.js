@@ -98,7 +98,7 @@ test('every table has row-level security and an own-rows policy', () => {
     assert.match(SQL, new RegExp('alter table public\\.' + t + ' enable row level security'), t + ' needs row level security');
     assert.match(SQL, new RegExp('create policy "[^"]+" on public\\.' + t + '\\s+for all to authenticated\\s+using \\(user_id = \\(select auth\\.uid\\(\\)\\)\\)\\s+with check \\(user_id = \\(select auth\\.uid\\(\\)\\)\\)'), t + ' needs an own-rows policy');
     assert.equal(schema[t].columns.user_id.default.fn, 'uid', t + '.user_id should default to auth.uid()');
-    assert.match(SQL, new RegExp('create index if not exists \\S+ on public\\.' + t + ' \\(user_id'), t + ' needs an index on user_id');
+    assert.match(SQL, new RegExp('create (unique )?index if not exists \\S+ on public\\.' + t + ' \\(user_id'), t + ' needs an index on user_id');
   }
 });
 

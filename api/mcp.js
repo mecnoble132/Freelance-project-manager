@@ -2,7 +2,7 @@
 // Every request needs an OAuth access token from /api/oauth; the token says whose data to use.
 const { verify, baseUrl, cors, json, logRequest } = require('./_lib/oauth');
 const { forUser } = require('./_lib/supabase');
-const { TOOLS, INSTRUCTIONS } = require('./_lib/tools');
+const { TOOLS, INSTRUCTIONS, PROMPTS } = require('./_lib/tools');
 const { Invalid } = require('./_lib/writes');
 
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -18,12 +18,18 @@ async function handle(msg, db) {
     case 'initialize':
       return ok(id, {
         protocolVersion: VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : VERSIONS[1],
-        capabilities: { tools: { listChanged: false } },
+        capabilities: { tools: { listChanged: false }, prompts: { listChanged: false } },
         serverInfo: { name: 'client-ledger', title: 'Client Ledger', version: '2.0.0' },
         instructions: INSTRUCTIONS
       });
     case 'ping': return ok(id, {});
     case 'tools/list': return ok(id, { tools: TOOLS.map(({ run, ...t }) => t) });
+    case 'prompts/list': return ok(id, { prompts: PROMPTS.map(({ text, ...p }) => p) });
+    case 'prompts/get': {
+      const p = PROMPTS.find(x => x.name === params.name);
+      if (!p) return err(id, -32602, 'Unknown prompt: ' + params.name);
+      return ok(id, { description: p.description, messages: [{ role: 'user', content: { type: 'text', text: p.text } }] });
+    }
     case 'tools/call': {
       const tool = TOOLS.find(t => t.name === params.name);
       if (!tool) return err(id, -32602, 'Unknown tool: ' + params.name);

@@ -184,13 +184,47 @@ textarea{resize:vertical;min-height:90px}
 .foot .ghost{margin-right:auto}
 @media (max-width:480px){.two,.three{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:no-preference){.sheet{animation:up .22s ease-out}@keyframes up{from{transform:translateY(24px);opacity:.6}}}
+.state.cancelled{text-decoration:line-through}
+.pre{white-space:pre-line}
+.items{display:flex;flex-direction:column;gap:8px}
+.itemrow{display:grid;gap:6px;padding:10px;border:1px solid var(--line);border-radius:12px}
+.itemnums{display:grid;grid-template-columns:5.5em minmax(0,1fr) auto;gap:6px;align-items:center}
+.invoice{background:var(--panel);border-radius:16px;box-shadow:var(--shadow);padding:28px;display:flex;flex-direction:column;gap:22px;max-width:820px;width:100%;box-sizing:border-box}
+.inv-head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.inv-biz{font-size:20px;font-weight:700}
+.inv-word{font-size:26px;font-weight:700;letter-spacing:.02em}
+.inv-title{text-align:right}
+.inv-muted{color:var(--muted);font-size:14px}
+.inv-meta{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;font-size:14px}
+.inv-meta .l,.inv-pay .l{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin-bottom:2px}
+.inv-items{font-size:14px;margin:0}
+.inv-items th:first-child,.inv-items td:first-child{text-align:left}
+.inv-items td{padding:9px 8px;overflow-wrap:anywhere}
+.inv-items tfoot td{border:none;font-weight:600}
+.inv-items tfoot .due td{font-size:17px}
+.inv-pay{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;font-size:14px}
+.inv-pay>div{display:flex;flex-direction:column;gap:4px}
+.qr svg{display:block;border-radius:8px}
+.inv-notes{font-size:14px;color:var(--muted)}
+.stamp{display:inline-block;margin-top:6px;border:2px solid currentColor;border-radius:6px;padding:2px 10px;font-weight:700;text-transform:uppercase;font-size:13px}
+.stamp.paid{color:var(--in)} .stamp.cancelled{color:var(--out)}
+@media (max-width:560px){.inv-meta{grid-template-columns:1fr 1fr}.inv-meta>div:first-child{grid-column:1/-1}.invoice{padding:18px}.inv-title{text-align:left}}
+/* Print (Save as PDF): just the invoice, in black on white, on one A4 page. */
+@media print{
+  @page{size:A4;margin:12mm}
+  :root{--panel:#fff;--bg:#fff;--fg:#000;--muted:#555;--line:#ccc}
+  body{background:#fff;color:#000;font-size:13px}
+  .top,.no-print,.back,#sheet-root{display:none!important}
+  .app{padding:0;max-width:none;gap:0}
+  .invoice{box-shadow:none;border-radius:0;padding:0;max-width:none}
+}
 </style>
 
 <div class="app" id="app">
   <div class="top">
     <div class="brand">Client Ledger</div>
     <nav class="tabs" id="tabs" aria-label="Sections" hidden>
-      <a href="#/">Dashboard</a><a href="#/projects">Projects</a><a href="#/clients">Clients</a><a href="#/money">Money</a>
+      <a href="#/">Dashboard</a><a href="#/projects">Projects</a><a href="#/clients">Clients</a><a href="#/money">Money</a><a href="#/invoices">Invoices</a>
     </nav>
     <button class="btn small" id="signout" type="button" hidden>Sign out</button>
   </div>
@@ -199,10 +233,11 @@ textarea{resize:vertical;min-height:90px}
 <div id="sheet-root"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script src="config.js"></script>
 <script>
 (function(){
-const S = { clients:[], projects:[], txns:[], milestones:[], view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
+const S = { clients:[], projects:[], txns:[], milestones:[], invoices:[], settings:[], iFilter:'open', view:{name:'home'}, ready:false, error:'', session:null, authReady:false,
   period:pref('period','this_fy'), pStatus:'open', pQuery:'', mType:'all', mQuery:'' };
 let db = null;
 const $ = (s,el=document)=>el.querySelector(s);
@@ -259,8 +294,8 @@ const msName = (i,n) => n===1 ? 'Full payment' : i===0 ? 'Advance' : i===n-1 ? '
 
 // ---------- routing ----------
 function parseHash(){ const parts=location.hash.replace(/^#\/?/,'').split('/'); const n=parts[0]||'home';
-  if((n==='project'||n==='client') && parts[1]) return {name:n,id:decodeURIComponent(parts[1])};
-  return {name:['projects','clients','money'].includes(n)?n:'home'}; }
+  if((n==='project'||n==='client'||n==='invoice') && parts[1]) return {name:n,id:decodeURIComponent(parts[1])};
+  return {name:['projects','clients','money','invoices'].includes(n)?n:'home'}; }
 const hrefOf = v => v.name==='home' ? '#/' : '#/'+v.name+(v.id?'/'+encodeURIComponent(v.id):'');
 function go(v){ const href=hrefOf(v); if(location.hash===href) render(); else location.hash=href; }
 window.addEventListener('hashchange',()=>{ S.view=parseHash(); closeSheet(); render(); window.scrollTo(0,0); });
@@ -270,13 +305,16 @@ function render(){
   const signedIn = !!(S.session && S.session.user);
   $('#signout').hidden = !signedIn;
   $('#tabs').hidden = !signedIn || !S.ready;
-  const tab = {project:'projects',client:'clients'}[S.view.name] || S.view.name;
+  const tab = {project:'projects',client:'clients',invoice:'invoices'}[S.view.name] || S.view.name;
   document.querySelectorAll('#tabs a').forEach(a=>{ if(a.getAttribute('href')===hrefOf({name:tab})) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current'); });
+  // On a phone the tabs scroll sideways; keep the current one in view.
+  const bar=$('#tabs'), cur=bar.querySelector('[aria-current]');
+  if(cur && !bar.hidden){ const over=cur.getBoundingClientRect().right-bar.getBoundingClientRect().right; if(over>0) bar.scrollLeft+=over+8; else if(cur.offsetLeft<bar.scrollLeft) bar.scrollLeft=0; }
   if(!S.authReady){ v.appendChild(h('div',{class:'empty'},'Loading…')); return; }
   if(!S.session){ return renderLogin(v); }
   if(S.error){ v.appendChild(h('div',{class:'empty'},S.error)); return; }
   if(!S.ready){ v.appendChild(h('div',{class:'empty'},'Loading your projects and money…')); return; }
-  ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney})[S.view.name](v, S.view.id);
+  ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney,invoices:renderInvoices,invoice:renderInvoice})[S.view.name](v, S.view.id);
 }
 
 // ---------- dashboard ----------
@@ -372,7 +410,7 @@ function renderHome(v){
   if(!rec.length) recCard.appendChild(h('div',{class:'empty'},'Every payment and expense you log shows up here.'));
   else recCard.appendChild(h('div',{class:'list'},rec.map(t=>txRow(t,true))));
 
-  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},owedCard,topCard,spendCard)));
+  v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},chartCard,recCard),h('div',{class:'stack'},collectCard(),owedCard,topCard,spendCard)));
   drawMoneyChart(chartBox, buckets);
 }
 const periodLabel = p => (PERIODS.find(x=>x[0]===p)||[])[1];
@@ -506,6 +544,13 @@ function renderProject(v,id){
   else money.appendChild(h('div',{class:'list'},tx.map(t=>txRow(t,false))));
   v.appendChild(h('div',{class:'cols'},h('div',{class:'stack'},about,milestonesCard(p)),money));
 }
+// The invoice for a milestone, or a button to create one for what's left of it.
+function milestoneInvoice(p,m){
+  const inv=S.invoices.find(i=>i.milestoneId===m.id && i.status!=='cancelled');
+  if(inv) return h('a',{class:'linkbtn',href:hrefOf({name:'invoice',id:inv.id})},inv.number);
+  if(!m.left || !canWrite()) return null;
+  return h('button',{class:'linkbtn',type:'button',onclick:()=>openInvoiceSheet({clientId:p.clientId,projectId:p.id,milestoneId:m.id,milestoneName:m.name,items:[{description:p.name+' — '+m.name,quantity:1,rate:m.left}]})},'Invoice this');
+}
 function milestonesCard(p){
   const ms=projMilestones(p), total=ms.reduce((a,m)=>a+m.amount,0);
   const card=h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'Payment milestones'),
@@ -514,7 +559,7 @@ function milestonesCard(p){
   card.appendChild(h('div',{class:'list'},ms.map(m=>h('div',{class:'row'},
     h('div',{class:'grow'},h('div',{class:'title'},m.name||'Milestone'),
       h('div',{class:'sub'},[m.dueDate?'Due '+fmtDate(m.dueDate):'No due date', m.state==='part-paid'||m.state==='overdue'&&m.paid?rs(m.paid)+' of '+rs(m.amount)+' paid':null].filter(Boolean).join(' · '))),
-    h('div',{class:'right'},h('span',{class:'num'},rs(m.amount)),h('span',{class:'state '+m.state},MS_STATES[m.state]))))));
+    h('div',{class:'right'},h('span',{class:'num'},rs(m.amount)),h('span',{class:'state '+m.state},MS_STATES[m.state]),milestoneInvoice(p,m))))));
   if(p.quoted && cents(total)!==cents(p.quoted)) card.appendChild(h('div',{class:'hint'},'The milestones add up to '+rs(total)+', but the quote is '+rs(p.quoted)+'.'));
   return card;
 }
@@ -664,7 +709,7 @@ function openProjectSheet(pre={}){
     else { const id=await api.insert('projects',row); go({name:'project',id}); }
   }, editing?'Save changes':'Add project', editing?{onDelete:()=>{
     const n=S.txns.filter(t=>t.projectId===p.id).length, nm=S.milestones.filter(m=>m.projectId===p.id).length;
-    confirmSheet('Delete '+p.name+'?', (n ? 'Its '+n+(n===1?' money entry stays':' money entries stay')+' with '+clientName(p.clientId)+', under “No project”.' : 'This can’t be undone.')+(nm?' Its '+nm+(nm===1?' milestone is':' milestones are')+' deleted.':''), 'Delete project', async()=>{ await api.del('projects',p.id); go({name:'projects'}); });
+    confirmSheet('Delete '+p.name+'?', (n ? 'Its '+n+(n===1?' money entry stays':' money entries stay')+' with '+clientName(p.clientId)+', under “No project”.' : 'This can’t be undone.')+(nm?' Its '+nm+(nm===1?' milestone is':' milestones are')+' deleted.':'')+(S.invoices.some(i=>i.projectId===p.id)?' Its invoices stay with '+clientName(p.clientId)+'.':''), 'Delete project', async()=>{ await api.del('projects',p.id); go({name:'projects'}); });
   }, deleteLabel:'Delete project'}:{});
 }
 
@@ -741,8 +786,8 @@ function openClientSheet(c){
     if(editing) await api.update('clients',c.id,row);
     else { const id=await api.insert('clients',{...row, sort_order:S.clients.length}); go({name:'client',id}); }
   }, editing?'Save changes':'Add client', editing?{onDelete:()=>{
-    const np=S.projects.filter(p=>p.clientId===c.id).length, nt=S.txns.filter(t=>t.clientId===c.id).length;
-    confirmSheet('Delete '+c.name+'?', 'This also deletes their '+np+(np===1?' project':' projects')+' and '+nt+(nt===1?' money entry':' money entries')+'. It can’t be undone.', 'Delete client and everything', async()=>{ await api.del('clients',c.id); go({name:'clients'}); });
+    const np=S.projects.filter(p=>p.clientId===c.id).length, nt=S.txns.filter(t=>t.clientId===c.id).length, ni=S.invoices.filter(i=>i.clientId===c.id).length;
+    confirmSheet('Delete '+c.name+'?', 'This also deletes their '+np+(np===1?' project':' projects')+', '+nt+(nt===1?' money entry':' money entries')+(ni?' and '+ni+(ni===1?' invoice':' invoices'):'')+'. It can’t be undone.', 'Delete client and everything', async()=>{ await api.del('clients',c.id); go({name:'clients'}); });
   }, deleteLabel:'Delete client'}:{});
 }
 
@@ -751,7 +796,8 @@ function openMoneySheet(pre={}){
   let type=t?t.type:'in';
   const segIn = h('button',{type:'button',class:'in'},'Money in');
   const segOut = h('button',{type:'button',class:'out'},'Money out');
-  const amount = h('input',{id:'m-amount',class:'amount',type:'number',inputmode:'decimal',min:'1',step:'any',required:true,placeholder:'0',value:t?t.amount:''});
+  const amount = h('input',{id:'m-amount',class:'amount',type:'number',inputmode:'decimal',min:'1',step:'any',required:true,placeholder:'0',value:t?t.amount:(pre.amount||'')});
+  const forInv = pre.invoice || (t && t.invoiceId && S.invoices.find(i=>i.id===t.invoiceId));
   const client = clientPicker('m-client', t?t.clientId:pre.clientId);
   const pSel = h('select',{id:'m-project'});
   const pNew = h('input',{id:'m-project-new',placeholder:'New project title','aria-label':'New project title'});
@@ -770,14 +816,14 @@ function openMoneySheet(pre={}){
     ps.forEach(p=>pSel.appendChild(h('option',{value:p.id},p.name)));
     pSel.appendChild(h('option',{value:''},'No project'));
     pSel.appendChild(h('option',{value:NEW},'+ New project…'));
-    pSel.value = want && ps.some(p=>p.id===want) ? want : (t && !t.projectId ? '' : (ps[0]?ps[0].id:NEW));
+    pSel.value = want && ps.some(p=>p.id===want) ? want : ((t && !t.projectId) || (pre.invoice && !pre.invoice.projectId) ? '' : (ps[0]?ps[0].id:NEW)); // a payment goes where its invoice is
     pNew.hidden = pSel.value!==NEW;
   }
   client.sel.addEventListener('change',fillProjects);
   pSel.onchange=()=>{ pNew.hidden = pSel.value!==NEW; };
   fillProjects();
   sheet(editing?'Edit entry':'Add money', [
-    h('div',{class:'seg',role:'group','aria-label':'Type'},segIn,segOut),
+    forInv ? h('div',{class:'notice'},'Payment for invoice '+forInv.number) : h('div',{class:'seg',role:'group','aria-label':'Type'},segIn,segOut),
     field('m-amount','Amount (₹)',amount),
     h('div',{class:'two'},
       h('div',{class:'field'},h('label',{for:'m-client'},'Client'),client.sel,client.box),
@@ -792,10 +838,240 @@ function openMoneySheet(pre={}){
     let projectId = pSel.value || null;
     if(projectId===NEW) projectId = await api.insert('projects',{client_id:clientId, name:pNew.value.trim()});
     const row={client_id:clientId, project_id:projectId, type, amount:amt, category:type==='out'?cat.value:'', note:note.value.trim(), date:date.value||null};
+    if(pre.invoice) row.invoice_id=pre.invoice.id;
     if(editing) await api.update('txns',t.id,row); else await api.insert('txns',row);
   }, editing?'Save changes':'Save', editing?{onDelete:()=>confirmSheet('Delete this entry?', (t.type==='out'?'−':'+')+rs(t.amount)+(t.note?' · '+t.note:'')+' · '+fmtDate(t.date), 'Delete entry', async()=>{ await api.del('txns',t.id); }), deleteLabel:'Delete entry'}:{});
 }
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheet(); });
+
+// ---------- invoices ----------
+const biz = () => S.settings[0] || map.settings({});
+const invOf = id => S.invoices.find(i=>i.id===id);
+// PREFIX/2026-27/001: counts up within each financial year and is never reused (same as ledger.js).
+const fyOfDate = d => { const y=Number(d.slice(0,4)), st=Number(d.slice(5,7))>=4?y:y-1; return st+'-'+String(st+1).slice(2); };
+function nextInvoiceNumber(prefix, issue){
+  const head=prefix+'/'+fyOfDate(issue)+'/';
+  const used=S.invoices.map(i=>i.number).filter(n=>n.startsWith(head)).map(n=>Number(n.slice(head.length))).filter(Number.isFinite);
+  return head+String(Math.max(0,...used)+1).padStart(3,'0');
+}
+const addDays = (d,n) => { const x=parseD(d); x.setDate(x.getDate()+n); return ymd(x); };
+const daysSince = d => Math.round((parseD(today())-parseD(d))/864e5);
+// Paid when its linked payments reach the total; cancelled is never owed; a draft isn't sent yet. Same rules as ledger.js.
+function invState(inv){
+  const paid=cents(S.txns.filter(t=>t.invoiceId===inv.id && t.type!=='out').reduce((a,t)=>a+t.amount,0)), due=cents(Math.max(0,inv.total-paid));
+  const state = inv.status==='cancelled'?'cancelled' : !due||inv.status==='paid'?'paid' : inv.status==='draft'?'draft' : inv.dueDate&&inv.dueDate<today()?'overdue' : paid?'part-paid':'unpaid';
+  return {paid, due:['paid','cancelled'].includes(state)?0:due, state, days:state==='overdue'?daysSince(inv.dueDate):0};
+}
+const INV_STATES = {draft:'Draft',unpaid:'Unpaid','part-paid':'Part paid',overdue:'Overdue',paid:'Paid',cancelled:'Cancelled'};
+const owing = x => x.due>0 && x.state!=='draft'; // sent and not fully paid
+function upiLink(inv,due){
+  const b=biz(); if(!b.upiId || !due) return null;
+  const q={pa:b.upiId, pn:b.businessName||b.upiId, am:due.toFixed(2), cu:'INR', tn:inv.number};
+  return 'upi://pay?'+Object.entries(q).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
+}
+// Drawn with the qrcode-generator library from the CDN. Without it, the UPI ID and link still show.
+function qrSvg(text){
+  if(!window.qrcode) return null;
+  const q=window.qrcode(0,'M'); q.addData(text); q.make();
+  const n=q.getModuleCount(), m=4, d=[];
+  for(let r=0;r<n;r++) for(let c=0;c<n;c++) if(q.isDark(r,c)) d.push('M'+(c+m)+','+(r+m)+'h1v1h-1z');
+  return svg('svg',{viewBox:'0 0 '+(n+2*m)+' '+(n+2*m),width:'150',height:'150',role:'img','aria-label':'UPI QR code','shape-rendering':'crispEdges','data-upi':text},
+    svg('rect',{width:'100%',height:'100%',fill:'#fff'}),svg('path',{d:d.join(''),fill:'#000'}));
+}
+// Indian numbers: 10 digits means +91 (same as ledger.js).
+function waNumber(contact){ const m=String(contact||'').match(/\+?\d[\d\s-]{8,}\d/); if(!m) return null; const d=m[0].replace(/\D/g,''); return d.length===10?'91'+d:d.length>=11&&d.length<=15?d:null; }
+// Reminders get firmer after 7 and 30 days overdue.
+function reminderText(inv){
+  const s=invState(inv), c=clientOf(inv.clientId)||{}, b=biz(), amt=rs(s.due), due=inv.dueDate?fmtDate(inv.dueDate):'';
+  const body = s.days>30 ? 'Invoice '+inv.number+' for '+amt+' is now '+s.days+' days overdue. Please make the payment by '+fmtDate(addDays(today(),7))+', or reply with the date you will pay it.'
+    : s.days>=7 ? 'Invoice '+inv.number+' for '+amt+' was due on '+due+' and is now '+s.days+' days overdue. Please arrange the payment this week.'
+    : 'This is a friendly reminder that invoice '+inv.number+' for '+amt+(s.state==='overdue'?' was due on '+due:due?' is due on '+due:' is due')+'.';
+  const pay=[b.upiId?'You can pay by UPI to '+b.upiId+'.':'', b.bankDetails?'Bank transfer:\n'+b.bankDetails:''].filter(Boolean).join('\n');
+  return ['Hi'+(c.name?' '+c.name:'')+',', body, pay, 'Thank you'+(b.businessName?',\n'+b.businessName:'')].filter(Boolean).join('\n\n');
+}
+
+function invoiceRow(x){
+  const p=projOf(x.i.projectId);
+  return h('a',{class:'row',href:hrefOf({name:'invoice',id:x.i.id})},
+    h('div',{class:'grow'},h('div',{class:'title'},x.i.number+' · '+clientName(x.i.clientId)),
+      h('div',{class:'sub'},[p?p.name:null,'Issued '+fmtDate(x.i.issueDate), x.state==='overdue'?x.days+(x.days===1?' day':' days')+' overdue':x.i.dueDate&&owing(x)?'Due '+fmtDate(x.i.dueDate):null].filter(Boolean).join(' · '))),
+    h('div',{class:'right'},h('span',{class:'num'},rs(owing(x)?x.due:x.i.total)),h('span',{class:'state '+x.state},INV_STATES[x.state])));
+}
+// What each client owes on sent invoices, most overdue first. Used on the dashboard and the Invoices tab.
+function collectCard(){
+  const by={};
+  S.invoices.map(i=>({i,...invState(i)})).filter(owing).forEach(x=>{ const o=by[x.i.clientId]=by[x.i.clientId]||{id:x.i.clientId,due:0,days:0,n:0}; o.due+=x.due; o.days=Math.max(o.days,x.days); o.n++; });
+  const list=Object.values(by).sort((a,b)=>b.days-a.days||b.due-a.due);
+  if(!list.length) return null;
+  return h('div',{class:'card'},h('div',{class:'card-head'},h('h2',null,'To collect on invoices'),h('span',{class:'num sub'},rs(list.reduce((a,o)=>a+o.due,0)))),
+    h('div',{class:'list'},list.map(o=>h('a',{class:'row',href:hrefOf({name:'client',id:o.id})},
+      h('div',{class:'grow'},h('div',{class:'title'},clientName(o.id)),h('div',{class:'sub'},o.n+(o.n===1?' invoice':' invoices')+(o.days?' · '+o.days+(o.days===1?' day':' days')+' overdue':' · not due yet'))),
+      h('span',{class:'num'+(o.days?' out':'')},rs(o.due))))));
+}
+function setupNotice(){
+  const b=biz(); if(b.businessName && b.upiId) return null;
+  return h('div',{class:'notice no-print'},'Add your business name and UPI ID so invoices show who to pay. ',canWrite()?h('button',{class:'linkbtn',type:'button',onclick:openSettingsSheet},'Add your details'):null);
+}
+
+function renderInvoices(v){
+  const all=S.invoices.map(i=>({i,...invState(i)}));
+  const filters=[['open','Unpaid'],['overdue','Overdue'],['draft','Drafts'],['paid','Paid'],['cancelled','Cancelled'],['all','All']];
+  const keep=k=>x=>k==='all'||(k==='open'?owing(x):x.state===k);
+  add(v,
+    h('div',{class:'page-head'},h('h1',null,'Invoices'),canWrite()?h('div',{class:'actions'},
+      h('button',{class:'btn',type:'button',onclick:openSettingsSheet},'Your details'),
+      h('button',{class:'btn primary',type:'button',onclick:()=>openInvoiceSheet()},'+ New invoice')):null),
+    setupNotice());
+  if(!all.length){ v.appendChild(h('div',{class:'empty'},'No invoices yet. Create one here, or from a milestone on a project page.')); return; }
+  add(v, collectCard(),
+    h('div',{class:'filters'},h('div',{class:'pills',role:'group','aria-label':'Invoices'},filters.map(([k,l])=>h('button',{type:'button','aria-pressed':String(S.iFilter===k),onclick:()=>{S.iFilter=k;render();}},l+' '+all.filter(keep(k)).length)))));
+  const list=all.filter(keep(S.iFilter)).sort((a,b)=>b.i.issueDate.localeCompare(a.i.issueDate)||b.i.number.localeCompare(a.i.number));
+  v.appendChild(list.length ? h('div',{class:'list'},list.map(invoiceRow)) : h('div',{class:'empty'},'No invoices here.'));
+}
+
+function invoiceDoc(inv,s){
+  const b=biz(), c=clientOf(inv.clientId)||{}, p=projOf(inv.projectId), link=upiLink(inv,s.due), qr=link?qrSvg(link):null;
+  const lines=inv.items.map(i=>h('tr',null,h('td',null,i.description),h('td',null,String(i.quantity)),h('td',{class:'num'},rs(i.rate)),h('td',{class:'num'},rs(i.quantity*i.rate))));
+  const foot=[h('tr',null,h('td',{colspan:'3'},'Total'),h('td',{class:'num'},rs(inv.total)))];
+  if(s.paid && s.state!=='cancelled') foot.push(h('tr',null,h('td',{colspan:'3'},'Paid'),h('td',{class:'num'},'−'+rs(s.paid))));
+  if(s.state!=='cancelled' && s.state!=='paid') foot.push(h('tr',{class:'due'},h('td',{colspan:'3'},'Amount due'),h('td',{class:'num'},rs(s.due))));
+  const payable = s.due>0 && (link || b.bankDetails);
+  return h('article',{class:'invoice'},
+    h('div',{class:'inv-head'},
+      h('div',null,h('div',{class:'inv-biz'},b.businessName||'Your business name'),[b.address,b.phone,b.email].filter(Boolean).map(x=>h('div',{class:'inv-muted pre'},x))),
+      h('div',{class:'inv-title'},h('div',{class:'inv-word'},'Invoice'),h('div',{class:'num'},inv.number),['paid','cancelled'].includes(s.state)?h('div',{class:'stamp '+s.state},INV_STATES[s.state]):null)),
+    h('div',{class:'inv-meta'},
+      h('div',null,h('div',{class:'l'},'Bill to'),h('div',{style:'font-weight:600'},c.name||'Unknown client'),c.contact?h('div',{class:'inv-muted'},c.contact):null,p?h('div',{class:'inv-muted'},'Project: '+p.name):null),
+      h('div',null,h('div',{class:'l'},'Issued'),fmtDate(inv.issueDate)),
+      h('div',null,h('div',{class:'l'},'Due'),inv.dueDate?fmtDate(inv.dueDate):'On receipt')),
+    h('div',{class:'tblwrap'},h('table',{class:'inv-items'},h('thead',null,h('tr',null,h('th',null,'Description'),h('th',null,'Qty'),h('th',null,'Rate'),h('th',null,'Amount'))),h('tbody',null,lines),h('tfoot',null,foot))),
+    payable ? h('div',{class:'inv-pay'},
+      qr ? h('div',{class:'qr'},qr,h('span',{class:'inv-muted'},'Scan to pay '+rs(s.due))) : null,
+      h('div',null,h('div',{class:'l'},'How to pay'),
+        b.upiId?h('div',null,'UPI: ',h('b',null,b.upiId)):null,
+        link?h('a',{class:'linkbtn no-print',href:link},'Pay '+rs(s.due)+' in a UPI app'):null,
+        b.bankDetails?h('div',{class:'pre'},b.bankDetails):null)) : null,
+    inv.notes?h('div',{class:'inv-notes pre'},inv.notes):null);
+}
+
+function renderInvoice(v,id){
+  const inv=invOf(id); if(!inv){ go({name:'invoices'}); return; }
+  const s=invState(inv), pays=sortTx(S.txns.filter(t=>t.invoiceId===id)), open=s.due>0;
+  const act = fn => async()=>{ try{ await fn(); }catch(e){ console.warn(e); } };
+  add(v,
+    h('a',{class:'back',href:'#/invoices'},'← All invoices'),
+    h('div',{class:'page-head no-print'},
+      h('div',{style:'display:flex;gap:10px;align-items:center;flex-wrap:wrap'},h('h1',null,inv.number),h('span',{class:'state '+s.state},INV_STATES[s.state])),
+      h('div',{class:'actions'},
+        h('button',{class:'btn',type:'button',onclick:()=>window.print()},'Print / PDF'),
+        canWrite()&&s.state!=='cancelled'?h('button',{class:'btn',type:'button',onclick:()=>openInvoiceSheet({invoice:inv})},'Edit'):null,
+        canWrite()&&inv.status==='draft'?h('button',{class:'btn',type:'button',onclick:act(()=>api.update('invoices',inv.id,{status:'sent',sent_at:new Date().toISOString()}))},'Mark sent'):null,
+        canWrite()&&open&&inv.status!=='draft'?h('button',{class:'btn',type:'button',onclick:()=>openReminderSheet(inv)},'Remind'):null,
+        canWrite()&&open?h('button',{class:'btn primary',type:'button',onclick:()=>openMoneySheet({clientId:inv.clientId,projectId:inv.projectId,invoice:inv,amount:s.due})},'Record payment'):null)),
+    setupNotice(),
+    inv.reminderCount?h('div',{class:'notice no-print'},'Reminded '+inv.reminderCount+(inv.reminderCount===1?' time':' times')+', last on '+fmtDate(inv.lastReminded)+'.'):null,
+    invoiceDoc(inv,s));
+  const card=h('div',{class:'card no-print'},h('div',{class:'card-head'},h('h2',null,'Payments'),h('span',{class:'sub'},rs(s.paid)+' of '+rs(inv.total))));
+  card.appendChild(pays.length?h('div',{class:'list'},pays.map(t=>txRow(t,false))):h('div',{class:'empty'},s.state==='cancelled'?'This invoice is cancelled, so nothing is owed on it.':'No payments yet. Use Record payment when the client pays.'));
+  if(canWrite()) card.appendChild(s.state==='cancelled'
+    ? h('button',{class:'btn small',type:'button',onclick:act(()=>api.update('invoices',inv.id,{status:'draft'}))},'Reopen as a draft')
+    : h('button',{class:'btn small ghost',type:'button',onclick:()=>confirmSheet('Cancel '+inv.number+'?','It stays in your records as cancelled and is never owed. Its number isn’t reused.','Cancel invoice',async()=>{ await api.update('invoices',inv.id,{status:'cancelled'}); })},'Cancel invoice'));
+  v.appendChild(card);
+}
+
+function openInvoiceSheet(pre={}){
+  const inv=pre.invoice, editing=!!inv, b=biz();
+  const client=clientPicker('i-client', inv?inv.clientId:pre.clientId);
+  const pSel=h('select',{id:'i-project'});
+  const fillProjects=()=>{ pSel.textContent=''; pSel.appendChild(h('option',{value:''},'No project'));
+    if(client.sel.value!==NEW) sortProjects(S.projects.filter(p=>p.clientId===client.sel.value)).forEach(p=>pSel.appendChild(h('option',{value:p.id},p.name)));
+    const want=inv?inv.projectId:pre.projectId; pSel.value = want && [...pSel.options].some(o=>o.value===want) ? want : ''; };
+  client.sel.addEventListener('change',fillProjects); fillProjects();
+  const issue=h('input',{id:'i-issue',type:'date',value:inv?inv.issueDate:today()});
+  const due=h('input',{id:'i-due',type:'date',value:inv?(inv.dueDate||''):addDays(today(),b.paymentTermsDays)});
+  const number=h('span',{class:'num'},inv?inv.number:nextInvoiceNumber(b.invoicePrefix,today()));
+  let dueTouched=editing; due.addEventListener('input',()=>{ dueTouched=true; });
+  issue.addEventListener('input',()=>{ if(!issue.value) return; if(!dueTouched) due.value=addDays(issue.value,b.paymentTermsDays); if(!editing) number.textContent=nextInvoiceNumber(b.invoicePrefix,issue.value); });
+  const box=h('div',{class:'items'}), total=h('div',{class:'total',role:'status'});
+  let rows=[];
+  const sync=()=>{ total.textContent='Total '+rs(cents(rows.reduce((a,r)=>a+(Number(r.qty.value)||0)*(Number(r.rate.value)||0),0))); 
+    rows.forEach((r,i)=>{ r.desc.setAttribute('aria-label','Item '+(i+1)+' description'); r.qty.setAttribute('aria-label','Item '+(i+1)+' quantity'); r.rate.setAttribute('aria-label','Item '+(i+1)+' rate (₹)'); }); };
+  const addItem=(it={})=>{
+    const r={ desc:h('input',{placeholder:'What it’s for',value:it.description||''}),
+      qty:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',value:it.quantity??1}),
+      rate:h('input',{type:'number',inputmode:'decimal',min:'0',step:'any',placeholder:'Rate (₹)',value:it.rate||''}) };
+    r.qty.addEventListener('input',sync); r.rate.addEventListener('input',sync);
+    r.el=h('div',{class:'itemrow'},r.desc,h('div',{class:'itemnums'},r.qty,r.rate,h('button',{class:'btn small ghost',type:'button',onclick:()=>{ rows=rows.filter(x=>x!==r); r.el.remove(); sync(); }},'Remove')));
+    rows.push(r); box.appendChild(r.el); return r;
+  };
+  (inv?inv.items:pre.items||[{}]).forEach(addItem); sync();
+  const notes=h('textarea',{id:'i-notes',placeholder:'e.g. Thank you for your business'}); notes.value=inv?inv.notes:b.invoiceNotes;
+  sheet(editing?'Edit '+inv.number:'New invoice',[
+    h('p',{class:'muted',style:'margin:0'},'Invoice ',number,pre.milestoneName?' · for the '+pre.milestoneName+' milestone':''),
+    h('div',{class:'two'},h('div',{class:'field'},h('label',{for:'i-client'},'Client'),client.sel,client.box),field('i-project','Project',pSel)),
+    h('div',{class:'two'},field('i-issue','Issue date',issue),field('i-due','Due date',due,'Your payment terms: '+b.paymentTermsDays+(b.paymentTermsDays===1?' day':' days'))),
+    h('div',{class:'field'},h('span',{class:'hint',style:'font-weight:600;font-size:13px'},'Items'),box,h('button',{class:'linkbtn',type:'button',onclick:()=>{ addItem().desc.focus(); sync(); }},'+ Add item')),
+    total,
+    field('i-notes','Notes on the invoice',notes)
+  ], async ()=>{
+    const items=[];
+    for(let i=0;i<rows.length;i++){ const r=rows[i], d=r.desc.value.trim(), q=Number(r.qty.value), rate=Number(r.rate.value);
+      if(!d) return fail('Item '+(i+1)+' needs a description.');
+      if(!(q>0)) return fail('Item '+(i+1)+' needs a quantity above 0.');
+      if(!(rate>0)) return fail('Item '+(i+1)+' needs a rate above ₹0.');
+      items.push({description:d, quantity:q, rate}); }
+    if(!items.length) return fail('Add at least one item.');
+    if(!issue.value) return fail('Pick the issue date.');
+    if(due.value && due.value<issue.value) return fail('The due date can’t be before the issue date.');
+    const cid=await client.resolve(); if(!cid) return false;
+    const row={client_id:cid, project_id:pSel.value||null, issue_date:issue.value, due_date:due.value||null, items, total:cents(items.reduce((a,i)=>a+i.quantity*i.rate,0)), notes:notes.value.trim()};
+    if(editing) await api.update('invoices',inv.id,row);
+    else { const id=await api.insert('invoices',{...row, milestone_id:pre.milestoneId||null, number:nextInvoiceNumber(b.invoicePrefix,issue.value), status:'draft'}); go({name:'invoice',id}); }
+  }, editing?'Save changes':'Create invoice', {noFocus:!!pre.items});
+}
+
+function openSettingsSheet(){
+  const b=biz(), row=S.settings[0];
+  const inp=(id,v,a={})=>h('input',{id,value:v??'',...a}), area=(id,v,ph)=>{ const t=h('textarea',{id,placeholder:ph||''}); t.value=v||''; return t; };
+  const name=inp('s-name',b.businessName,{placeholder:'e.g. Mec Web Studio'}), address=area('s-address',b.address), phone=inp('s-phone',b.phone,{type:'tel'}), email=inp('s-email',b.email,{type:'email'}),
+    upi=inp('s-upi',b.upiId,{placeholder:'yourname@okhdfcbank',autocapitalize:'off',spellcheck:'false'}), bank=area('s-bank',b.bankDetails,'Account name\nAccount number\nIFSC and bank'),
+    prefix=inp('s-prefix',b.invoicePrefix,{autocapitalize:'characters'}), terms=inp('s-terms',b.paymentTermsDays,{type:'number',min:'0',max:'365',step:'1',inputmode:'numeric'}), notes=area('s-notes',b.invoiceNotes,'e.g. Thank you for your business');
+  sheet('Your business details',[
+    h('p',{class:'muted',style:'margin:0'},'Printed on your invoices.'),
+    field('s-name','Business name',name), field('s-address','Address',address),
+    h('div',{class:'two'},field('s-phone','Phone',phone),field('s-email','Email',email)),
+    field('s-upi','UPI ID',upi,'Clients scan a QR code on the invoice to pay this'), field('s-bank','Bank details',bank,'For clients who pay by bank transfer'),
+    h('div',{class:'two'},field('s-prefix','Invoice number prefix',prefix,'INV gives INV/2026-27/001'),field('s-terms','Payment terms (days)',terms,'Days until an invoice is due')),
+    field('s-notes','Notes on every new invoice',notes)
+  ], async ()=>{
+    const u=upi.value.trim(), pf=prefix.value.trim()||'INV', t=terms.value===''?7:Number(terms.value);
+    if(u && !/^[\w.\-]{2,256}@[a-z][a-z0-9.\-]{1,64}$/i.test(u)) return fail('The UPI ID doesn’t look right. It looks like name@bank, e.g. yourname@okhdfcbank.');
+    if(!/^[A-Za-z0-9-]{1,10}$/.test(pf)) return fail('The prefix can only have letters, numbers and dashes (up to 10), like INV.');
+    if(!Number.isInteger(t) || t<0 || t>365) return fail('Payment terms must be a whole number of days from 0 to 365.');
+    const r={business_name:name.value.trim(), address:address.value.trim(), phone:phone.value.trim(), email:email.value.trim(), upi_id:u, bank_details:bank.value.trim(), invoice_prefix:pf, payment_terms_days:t, invoice_notes:notes.value.trim()};
+    if(row) await api.update('settings',row.id,r); else await api.insert('settings',r);
+  }, 'Save details');
+}
+
+// The message is written here and sent by you (copy it, or open WhatsApp). Nothing is sent from the app.
+function openReminderSheet(inv){
+  const c=clientOf(inv.clientId)||{}, num=waNumber(c.contact), s=invState(inv);
+  const msg=h('textarea',{id:'r-text',rows:'10'}); msg.value=reminderText(inv);
+  const status=h('span',{class:'hint',role:'status'});
+  const wa = num ? h('a',{class:'btn small',id:'r-wa',target:'_blank',rel:'noopener noreferrer'},'Send on WhatsApp') : null;
+  const syncWa=()=>{ if(wa) wa.href='https://wa.me/'+num+'?text='+encodeURIComponent(msg.value); };
+  msg.addEventListener('input',syncWa); syncWa();
+  const tone = s.days>30 ? 'Over a month late, so it asks for a payment date.' : s.days>=7 ? 'Over a week late, so it’s direct.' : 'A friendly nudge.';
+  sheet('Remind '+(c.name||'the client'),[
+    h('p',{class:'muted',style:'margin:0'},[inv.number, rs(s.due)+' due', s.days?s.days+(s.days===1?' day':' days')+' overdue':null, inv.reminderCount?'reminded '+inv.reminderCount+(inv.reminderCount===1?' time':' times')+', last on '+fmtDate(inv.lastReminded):null].filter(Boolean).join(' · ')),
+    field('r-text','Message',msg,tone+' Edit it as you like.'),
+    h('div',{class:'splits'},
+      h('button',{class:'btn small',type:'button',onclick:async()=>{ try{ await navigator.clipboard.writeText(msg.value); status.textContent='Copied.'; }catch(e){ msg.select(); status.textContent='Press copy to copy the selected text.'; } }},'Copy reminder'),
+      wa || h('span',{class:'hint'},'Add a phone number to '+(c.name||'the client')+'’s contact to send it on WhatsApp.'),
+      status),
+    h('p',{class:'hint',style:'margin:0'},'After you send it, mark it as reminded, so the next reminder can be firmer.')
+  ], async ()=>{ await api.update('invoices',inv.id,{last_reminded:today(), reminder_count:(inv.reminderCount||0)+1}); }, 'Mark as reminded', {noFocus:true});
+}
 
 // ---------- login ----------
 function renderLogin(v){
@@ -829,15 +1105,20 @@ function renderLogin(v){
 const cfg = window.LEDGER_CONFIG || {};
 const sb = (window.supabase && cfg.supabaseUrl && cfg.supabaseAnonKey) ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey) : null;
 const ms = t => t ? Date.parse(t) : 0;
-const TABLES = ['clients','projects','txns','milestones'];
-const OPTIONAL = ['milestones']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
+const TABLES = ['clients','projects','txns','milestones','invoices','settings'];
+const OPTIONAL = ['milestones','invoices','settings']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
 // Columns added for the dashboard default to empty, so the app still loads before supabase/schema.sql is re-run.
 const map = {
   clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
   projects: r => ({ id:r.id, clientId:r.client_id, name:r.name, status:r.status||'active', description:r.description||'', quoted:Number(r.quoted)||0,
     previewUrl:cleanUrl(r.preview_url)||'', liveUrl:cleanUrl(r.live_url)||'', githubUrl:cleanUrl(r.github_url)||'', startDate:r.start_date||null, dueDate:r.due_date||null, createdAt:ms(r.created_at) }),
-  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, createdAt:ms(r.created_at) }),
-  milestones: r => ({ id:r.id, projectId:r.project_id, name:r.name||'', amount:Number(r.amount)||0, dueDate:r.due_date||null, order:r.sort_order??0, createdAt:ms(r.created_at) })
+  txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, invoiceId:r.invoice_id||null, createdAt:ms(r.created_at) }),
+  milestones: r => ({ id:r.id, projectId:r.project_id, name:r.name||'', amount:Number(r.amount)||0, dueDate:r.due_date||null, order:r.sort_order??0, createdAt:ms(r.created_at) }),
+  invoices: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id||null, milestoneId:r.milestone_id||null, number:r.number, issueDate:r.issue_date, dueDate:r.due_date||null,
+    total:Number(r.total)||0, status:r.status||'draft', notes:r.notes||'', sentAt:r.sent_at||null, lastReminded:r.last_reminded||null, reminderCount:r.reminder_count||0, createdAt:ms(r.created_at),
+    items:(Array.isArray(r.items)?r.items:[]).map(i=>({description:i.description||'', quantity:Number(i.quantity)||0, rate:Number(i.rate)||0})) }),
+  settings: r => ({ id:r.id, businessName:r.business_name||'', address:r.address||'', phone:r.phone||'', email:r.email||'', upiId:r.upi_id||'', bankDetails:r.bank_details||'',
+    invoicePrefix:r.invoice_prefix||'INV', paymentTermsDays:r.payment_terms_days??7, invoiceNotes:r.invoice_notes||'' })
 };
 async function load(){
   const res = await Promise.all(TABLES.map(t=>sb.from(t).select('*')));
@@ -876,7 +1157,7 @@ if(!sb){
     S.authReady=true; S.session=session;
     if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
     if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
-    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.ready=false; closeSheet(); render(); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.ready=false; closeSheet(); render(); }
   });
 }
 })();

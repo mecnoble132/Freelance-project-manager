@@ -111,8 +111,8 @@ const TOOLS = [
 
   // ---------- money ----------
   { name: 'add_payment', title: 'Log a payment received', annotations: WRITE,
-    description: 'Records money received from a client.',
-    inputSchema: obj(entrySchema, ['amount']), run: (db, a) => W.addTransactions(db, [{ ...a, type: 'in' }], 'Logged a payment') },
+    description: 'Records money received from a client. Pass invoice when it pays an invoice: the client and project then come from the invoice, and the invoice counts as paid once its payments reach its total.',
+    inputSchema: obj({ ...entrySchema, invoice: str('Invoice number (or its last part, like "001") this payment is for.') }, ['amount']), run: (db, a) => W.addTransactions(db, [{ ...a, type: 'in' }], 'Logged a payment') },
   { name: 'add_expense', title: 'Log an expense', annotations: WRITE,
     description: 'Records money spent on a client or project, like a domain, hosting or a contractor.',
     inputSchema: obj({ ...entrySchema, category: { type: 'string', enum: CATEGORIES, description: 'Defaults to a category matching the note, else Other.' } }, ['amount']),
@@ -125,11 +125,54 @@ const TOOLS = [
   { name: 'update_transaction', title: 'Edit a payment or expense', annotations: EDIT,
     description: 'Changes a money entry by id: amount, date, note, type, category, or which client/project it belongs to. Pass project as an empty string to detach it from its project.',
     inputSchema: obj({ id: str('Entry id, from list_transactions or get_project.'), type: { type: 'string', enum: ['in', 'out'] }, amount: entrySchema.amount,
-      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project }, ['id']),
+      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project,
+      invoice: str('Invoice number this payment is for. Empty string unlinks it, which reopens the invoice.') }, ['id']),
     run: W.updateTransaction },
   { name: 'delete_transactions', title: 'Delete payments or expenses', annotations: DELETE,
     description: 'Deletes one or more money entries by id. First call without confirm to see what would be deleted.',
     inputSchema: obj({ ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 200 }, confirm }, ['ids']), run: W.deleteTransactions },
+
+  // ---------- invoices ----------
+  { name: 'get_settings', title: 'Business details', annotations: RO,
+    description: 'The business details printed on invoices (name, address, phone, email, UPI ID, bank details), the invoice number prefix, payment terms in days and default invoice notes.',
+    inputSchema: obj({}), run: W.getSettings },
+  { name: 'update_settings', title: 'Edit business details', annotations: EDIT,
+    description: 'Changes the business details printed on invoices. Only the fields given are changed.',
+    inputSchema: obj({ business_name: str('Name shown at the top of invoices.'), address: str('Postal address.'), phone: str('Phone.'), email: str('Email.'),
+      upi_id: str('UPI ID clients pay to, like name@okhdfcbank. Used for the QR code.'), bank_details: str('Account name, number, IFSC and bank, for bank transfers.'),
+      invoice_prefix: str('Start of invoice numbers, like INV (INV/2026-27/001).'), payment_terms_days: { type: 'integer', minimum: 0, maximum: 365, description: 'Days until an invoice is due.' },
+      invoice_notes: str('Default notes printed on new invoices.') }),
+    run: W.updateSettings },
+  { name: 'create_invoice', title: 'Create an invoice', annotations: WRITE,
+    description: 'Creates an invoice for a client, numbered automatically (INV/2026-27/001, restarting each financial year). Either invoice a project milestone (its unpaid amount) or give line items. It starts as a draft unless mark_sent is true. No tax is added.',
+    inputSchema: obj({ client: entrySchema.client, project: str('Project title (or "client title").'), milestone: str('Milestone name on the project, to invoice what is left of it.'),
+      items: { type: 'array', minItems: 1, maxItems: 50, items: obj({ description: str('What the line is for.'), quantity: { type: 'number', exclusiveMinimum: 0, description: 'Defaults to 1.' }, rate: { type: 'number', minimum: 0.01, description: 'Price per unit in rupees.' } }, ['description', 'rate']),
+        description: 'Line items. Not needed when invoicing a milestone.' },
+      issue_date: day('Issue date. Defaults to today'), due_date: day('Due date. Defaults to the issue date plus the payment terms'), notes: str('Notes printed on the invoice. Defaults to the settings.'),
+      mark_sent: { type: 'boolean', description: 'True if the user has already sent it to the client.' }, allow_duplicate: { type: 'boolean', description: 'Allow a second open invoice for the same milestone.' } }),
+    run: W.createInvoice },
+  { name: 'update_invoice', title: 'Edit, send or cancel an invoice', annotations: EDIT,
+    description: 'Marks an invoice as sent, cancels it, or changes its line items, dates or notes. Invoices are never deleted, and their numbers never change or get reused: cancel instead.',
+    inputSchema: obj({ invoice: str('Invoice number or its last part, like "001".'), status: { type: 'string', enum: ['draft', 'sent', 'cancelled'] },
+      items: { type: 'array', minItems: 1, maxItems: 50, items: obj({ description: str('What the line is for.'), quantity: { type: 'number', exclusiveMinimum: 0 }, rate: { type: 'number', minimum: 0.01 } }, ['description', 'rate']) },
+      issue_date: day('Issue date'), due_date: str('Due date (YYYY-MM-DD). Empty string clears it.'), notes: str('Notes printed on the invoice.') }, ['invoice']),
+    run: W.updateInvoice },
+  { name: 'list_invoices', title: 'List invoices', annotations: RO,
+    description: 'Invoices with number, client, project, dates, total, paid, amount due and state (draft, unpaid, part-paid, overdue, paid, cancelled). Defaults to open ones (sent and not fully paid).',
+    inputSchema: obj({ filter: { type: 'string', enum: ['open', 'overdue', 'draft', 'paid', 'cancelled', 'all'] }, client: str('Client name, or part of it.') }),
+    run: read((l, a) => l.listInvoices(a)) },
+  { name: 'get_invoice', title: 'Invoice details', annotations: RO,
+    description: 'One invoice in full: line items, payments linked to it, amount due, reminders so far, and the UPI payment link.',
+    inputSchema: obj({ invoice: str('Invoice number or its last part, like "001".') }, ['invoice']), run: read((l, a) => l.getInvoice(a)) },
+  { name: 'list_overdue', title: 'Overdue invoices by client', annotations: RO,
+    description: 'Every overdue invoice, grouped by client with the total owed, days overdue and when they were last reminded. Use it for "who owes me money?".',
+    inputSchema: obj({}), run: read(l => l.listOverdue()) },
+  { name: 'draft_payment_reminder', title: 'Facts for a payment reminder', annotations: RO,
+    description: 'The facts for a payment reminder to one client or for one invoice: amounts, due dates, days overdue, times already reminded, UPI link, WhatsApp number and a suggested tone (friendly, firm after 7 days, final after 30). Write the message from these for the user to send themselves; nothing is sent.',
+    inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.') }), run: read((l, a) => l.reminderFacts(a)) },
+  { name: 'log_reminder', title: 'Log that a reminder was sent', annotations: WRITE,
+    description: 'Records that the user reminded a client about an invoice (or all their unpaid invoices), so the next reminder can be firmer. Call it after the user says they sent the message.',
+    inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.') }), run: W.logReminder },
 
   // ---------- undo ----------
   { name: 'undo_change', title: 'Undo a change', annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -140,6 +183,7 @@ const TOOLS = [
 const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense. All money is in Indian rupees (INR); dates are YYYY-MM-DD in India time.
 Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. A project's price can be split into payment milestones; its money received covers them in order, so each is paid, part-paid, unpaid or overdue (past its due date and not fully paid). Some older entries have no date; they only count under all_time.
 The financial year runs April to March (FY 2026–27 is 2026-04-01 to 2027-03-31). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
+Invoices: numbered like INV/2026-27/001 per financial year, never deleted (cancel instead). A payment linked to an invoice (add_payment with invoice) counts towards it; an invoice is paid when those reach its total, and overdue when past its due date and not paid. No tax (GST or TDS) is used yet. To chase money, use list_overdue and draft_payment_reminder, write the message yourself for the user to send, then log_reminder once they have sent it. This server never sends messages.
 Changing data:
 - Before creating or changing anything, make sure you have the details right. If the user's message was vague, sum up what you're about to save and ask first.
 - Several projects can share a title (many are called "Website"), so name the client too.
@@ -147,4 +191,12 @@ Changing data:
 - Deletes are two-step: call without confirm to get a preview, show it to the user, and only call again with confirm: true after they agree.
 - Every change returns a change_id. Tell the user what was saved; undo_change reverts it. Changes show up on the website the next time it's loaded.`;
 
-module.exports = { TOOLS, INSTRUCTIONS };
+// Ready-made requests the user can pick in Claude.
+const PROMPTS = [
+  { name: 'who_owes_me', title: 'Who owes me money?', description: 'Every client who owes money, most overdue first, and who to chase today.',
+    text: 'Using the Client Ledger tools, tell me who owes me money. Call list_overdue and list_invoices (filter open), and get_attention_items for projects with money still to collect or overdue milestones. Group it by client, biggest and most overdue first, with days overdue and when I last reminded them. End with who I should chase today, and offer to draft those reminders.' },
+  { name: 'weekly_review', title: 'Weekly review', description: 'How the business is doing, what is overdue, and what to do this week.',
+    text: 'Give me my weekly review using the Client Ledger tools: get_summary for this_month and this_fy, compare_periods with month_vs_last_month, get_attention_items and list_overdue. Cover money in and out, overdue invoices and milestones, milestones and projects due this week, open leads, and missing information. Finish with the three most useful things to do this week.' }
+];
+
+module.exports = { TOOLS, INSTRUCTIONS, PROMPTS };

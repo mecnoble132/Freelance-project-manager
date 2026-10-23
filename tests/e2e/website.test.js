@@ -19,6 +19,7 @@ const ROOT = path.join(__dirname, '..', '..');
 const SITE = 'https://ledger.test/';
 const USERS = [{ id: OWNER, email: 'me@example.com', password: 'right password' }];
 const FAKE_JS = ['tests/helpers/store.js', 'tests/e2e/fake-supabase-js.js'].map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
+const QR_JS = fs.readFileSync(require.resolve('qrcode-generator/qrcode.js', { paths: [__dirname] }), 'utf8');
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 
 let browser;
@@ -43,6 +44,7 @@ async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280,
   await page.route('**/*', route => {
     const url = route.request().url();
     if (url.startsWith('https://cdn.jsdelivr.net/npm/@supabase/')) return route.fulfill({ contentType: 'text/javascript', body: FAKE_JS });
+    if (url.startsWith('https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/')) return route.fulfill({ contentType: 'text/javascript', body: QR_JS }); // the real library, from npm
     if (!url.startsWith(SITE)) return route.fulfill({ status: 200, contentType: 'text/css', body: '' }); // fonts: no network in tests
     const file = path.join(ROOT, new URL(url).pathname.replace(/^\/$/, '/index.html'));
     if (!file.startsWith(ROOT) || !fs.existsSync(file)) return route.fulfill({ status: 404, body: 'not found' });
@@ -347,6 +349,207 @@ test('without a quote, every amount is typed by hand', async t => {
   assert.match(await page.locator('.sheet .total').textContent(), /^Total ₹7,000$/);
 });
 
+// ---------- invoices ----------
+const UPI_002 = 'upi://pay?pa=mec%40okhdfcbank&pn=Mec%20Web%20Studio&am=15000.00&cu=INR&tn=INV%2F2026-27%2F002';
+const invRow = async (page, number) => (await rows(page, 'invoices')).find(i => i.number === number && i.user_id === OWNER);
+
+test('invoices tab: what each client owes, and filters', async t => {
+  const page = await open(t, { hash: '#/invoices' });
+  await heading(page).filter({ hasText: 'Invoices' }).waitFor();
+  assert.match(await card(page, 'To collect on invoices').textContent(), /₹15,000.*GeekBoz.*1 invoice · 8 days overdue.*₹15,000/);
+  const listed = () => page.locator('#view > .list .row .title').allTextContents();
+  assert.deepEqual(await listed(), ['INV/2026-27/002 · GeekBoz']);
+  assert.deepEqual(await page.locator('.pills button').allTextContents(), ['Unpaid 1', 'Overdue 1', 'Drafts 1', 'Paid 2', 'Cancelled 1', 'All 5']);
+  await page.locator('.pills button', { hasText: /^Paid / }).click();
+  assert.deepEqual(await listed(), ['INV/2026-27/001 · GeekBoz', 'INV/2025-26/001 · Edustudy']);
+  await page.click('.pills button:has-text("Cancelled")');
+  assert.match(await page.locator('#view > .list').textContent(), /INV\/2025-26\/002.*₹5,000.*Cancelled/);
+  await page.goto(SITE + '#/');
+  assert.match(await card(page, 'To collect on invoices').textContent(), /GeekBoz.*8 days overdue/);
+});
+
+test('an invoice page: details, amount due, UPI QR code and link, bank details', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invDesign });
+  const doc = page.locator('.invoice');
+  await doc.waitFor();
+  const text = await doc.textContent();
+  for (const bit of ['Mec Web Studio', '12 MG Road, Kochi', 'INV/2026-27/002', 'GeekBoz', '98765 43210', 'Project: Website', '8 Oct 2026', '15 Oct 2026', 'Website — Design', 'Amount due₹15,000', 'UPI: mec@okhdfcbank', 'IFSC HDFC0001234', 'Scan to pay ₹15,000'])
+    assert.ok(text.includes(bit), 'the invoice should show ' + bit);
+  assert.equal(await page.locator('.invoice .qr svg').getAttribute('data-upi'), UPI_002);
+  assert.ok(await page.locator('.invoice .qr svg path').getAttribute('d'), 'the QR code is drawn');
+  assert.equal(await page.locator('.invoice a:has-text("UPI app")').getAttribute('href'), UPI_002);
+  assert.match(await page.locator('#view .page-head').textContent(), /Overdue/);
+  await page.waitForSelector('text=Reminded 1 time, last on 18 Oct 2026.');
+  // A paid invoice has no QR code and says Paid.
+  await page.goto(SITE + '#/invoice/' + ids.invAdvance);
+  await page.locator('.invoice .stamp.paid').waitFor();
+  assert.equal(await page.locator('.invoice .qr').count(), 0);
+  assert.match(await page.locator('.card:has(h2:has-text("Payments"))').textContent(), /Advance.*₹20,000/);
+});
+
+test('invoice a milestone: numbered, due after the payment terms, linked on the project page', async t => {
+  const page = await open(t, { hash: '#/project/' + ids.gbSite });
+  const ms = card(page, 'Payment milestones');
+  assert.match(await ms.locator('.row').nth(1).textContent(), /INV\/2026-27\/002/); // Design is already invoiced
+  await ms.locator('.row').nth(2).locator('button:has-text("Invoice this")').click();
+  assert.match(await page.locator('.sheet').textContent(), /Invoice INV\/2026-27\/004 · for the Launch milestone/);
+  assert.equal(await page.inputValue('#i-due'), '2026-10-30');
+  assert.equal(await page.inputValue('.sheet [aria-label="Item 1 description"]'), 'Website — Launch');
+  assert.match(await page.locator('.sheet .total').textContent(), /Total ₹15,000/);
+  await page.click('.sheet button:has-text("Create invoice")');
+  await heading(page).filter({ hasText: 'INV/2026-27/004' }).waitFor();
+  const row = await invRow(page, 'INV/2026-27/004');
+  assert.deepEqual([row.client_id, row.project_id, row.milestone_id, row.status, Number(row.total), row.notes, row.issue_date, row.due_date],
+    [ids.geekboz, ids.gbSite, ids.msLaunch, 'draft', 15000, 'Thank you!', '2026-10-23', '2026-10-30']);
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  assert.match(await card(page, 'Payment milestones').locator('.row').nth(2).textContent(), /INV\/2026-27\/004/);
+});
+
+test('a new invoice from line items; the number follows the issue date across 1 April', async t => {
+  const page = await open(t, { hash: '#/invoices' });
+  await page.click('#view button:has-text("+ New invoice")');
+  await page.selectOption('#i-client', ids.edustudy);
+  await page.fill('.sheet [aria-label="Item 1 description"]', 'Logo design');
+  await page.fill('.sheet [aria-label="Item 1 rate (₹)"]', '3000');
+  await page.click('.sheet button:has-text("+ Add item")');
+  await page.fill('.sheet [aria-label="Item 2 quantity"]', '3');
+  await page.fill('.sheet [aria-label="Item 2 rate (₹)"]', '1500');
+  assert.match(await page.locator('.sheet .total').textContent(), /Total ₹7,500/);
+  await page.click('.sheet button:has-text("Create invoice")');
+  await page.waitForSelector('text=Item 2 needs a description.');
+  await page.fill('.sheet [aria-label="Item 2 description"]', 'Extra pages');
+  await page.fill('#i-issue', '2027-04-01');
+  assert.equal(await page.inputValue('#i-due'), '2027-04-08');
+  assert.match(await page.locator('.sheet').textContent(), /Invoice INV\/2027-28\/001/);
+  await page.click('.sheet button:has-text("Create invoice")');
+  await heading(page).filter({ hasText: 'INV/2027-28/001' }).waitFor();
+  const row = await invRow(page, 'INV/2027-28/001');
+  assert.deepEqual(row.items, [{ description: 'Logo design', quantity: 1, rate: 3000 }, { description: 'Extra pages', quantity: 3, rate: 1500 }]);
+  assert.deepEqual([Number(row.total), row.project_id, row.status], [7500, null, 'draft']);
+  // Editing keeps the number.
+  await page.click('#view .page-head button:has-text("Edit")');
+  await page.fill('.sheet [aria-label="Item 1 rate (₹)"]', '4000');
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.deepEqual([Number((await invRow(page, 'INV/2027-28/001')).total), (await rows(page, 'invoices')).filter(i => i.user_id === OWNER).length], [8500, 6]);
+});
+
+test('mark a draft as sent, record payments for it, and it becomes paid', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invDraft });
+  await page.click('#view button:has-text("Mark sent")');
+  await page.locator('#view .page-head .state.unpaid').waitFor();
+  assert.ok((await invRow(page, 'INV/2026-27/003')).sent_at);
+  await page.click('#view button:has-text("Record payment")');
+  assert.match(await page.locator('.sheet .notice').textContent(), /Payment for invoice INV\/2026-27\/003/);
+  assert.equal(await page.inputValue('#m-amount'), '2500');
+  await page.fill('#m-amount', '1000');
+  await page.click('.sheet button:has-text("Save")');
+  await page.locator('#view .page-head .state.part-paid').waitFor();
+  assert.match(await page.locator('.invoice tfoot').textContent(), /Paid−₹1,000.*Amount due₹1,500/);
+  await page.click('#view button:has-text("Record payment")');
+  assert.equal(await page.inputValue('#m-amount'), '1500');
+  await page.click('.sheet button:has-text("Save")');
+  await page.locator('.invoice .stamp.paid').waitFor();
+  const pays = (await rows(page, 'txns')).filter(x => x.invoice_id === ids.invDraft);
+  assert.deepEqual(pays.map(x => [x.type, Number(x.amount), x.client_id, x.project_id]), [['in', 1000, ids.edustudy, null], ['in', 1500, ids.edustudy, null]]);
+  assert.equal(await page.locator('#view button:has-text("Record payment")').count(), 0);
+});
+
+test('remind a client: the message gets firmer, WhatsApp opens with it, then mark as reminded', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invDesign });
+  await page.click('#view button:has-text("Remind")');
+  const msg = await page.inputValue('#r-text');
+  assert.match(msg, /^Hi GeekBoz,\n\nInvoice INV\/2026-27\/002 for ₹15,000 was due on 15 Oct 2026 and is now 8 days overdue\./);
+  assert.match(msg, /You can pay by UPI to mec@okhdfcbank\./);
+  assert.match(msg, /Thank you,\nMec Web Studio$/);
+  assert.equal(await page.getAttribute('#r-wa', 'href'), 'https://wa.me/919876543210?text=' + encodeURIComponent(msg));
+  await page.fill('#r-text', 'Hi, please pay INV/2026-27/002 today.');
+  assert.equal(await page.getAttribute('#r-wa', 'href'), 'https://wa.me/919876543210?text=' + encodeURIComponent('Hi, please pay INV/2026-27/002 today.'));
+  await page.click('.sheet button:has-text("Mark as reminded")');
+  await page.waitForSelector('text=Reminded 2 times, last on 23 Oct 2026.');
+  const row = await invRow(page, 'INV/2026-27/002');
+  assert.deepEqual([row.reminder_count, row.last_reminded], [2, '2026-10-23']);
+});
+
+test('reminder tone: friendly before a week, a payment date after a month, and no WhatsApp without a number', async t => {
+  const early = await open(t, { hash: '#/invoice/' + ids.invDesign, now: '2026-10-18T12:00:00+05:30' });
+  await early.click('#view button:has-text("Remind")');
+  assert.match(await early.inputValue('#r-text'), /This is a friendly reminder that invoice INV\/2026-27\/002 for ₹15,000 was due on 15 Oct 2026\./);
+  const late = await open(t, { hash: '#/invoice/' + ids.invDesign, now: '2026-11-30T12:00:00+05:30' });
+  await late.click('#view button:has-text("Remind")');
+  assert.match(await late.inputValue('#r-text'), /is now 46 days overdue\. Please make the payment by 7 Dec 2026, or reply with the date you will pay it\./);
+  const edu = await open(t, { hash: '#/invoice/' + ids.invDraft });
+  await edu.click('#view button:has-text("Mark sent")');
+  await edu.click('#view button:has-text("Remind")');
+  await edu.waitForSelector('text=Add a phone number to Edustudy’s contact to send it on WhatsApp.');
+  assert.equal(await edu.locator('#r-wa').count(), 0);
+});
+
+test('cancel an invoice: never owed, number kept; reopen it', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invDesign });
+  await page.click('#view button:has-text("Cancel invoice")');
+  await page.click('.sheet button.danger');
+  await page.locator('.invoice .stamp.cancelled').waitFor();
+  assert.equal((await invRow(page, 'INV/2026-27/002')).status, 'cancelled');
+  assert.equal(await page.locator('.invoice .qr').count(), 0);
+  assert.equal(await page.locator('#view button:has-text("Record payment")').count(), 0);
+  await page.goto(SITE + '#/invoices');
+  assert.equal(await card(page, 'To collect on invoices').count(), 0);
+  await page.goto(SITE + '#/invoice/' + ids.invDesign);
+  await page.click('#view button:has-text("Reopen as a draft")');
+  await page.locator('#view .page-head .state.draft').waitFor();
+});
+
+test('your business details: added the first time, checked, and shown on invoices', async t => {
+  const page = await open(t, { hash: '#/invoices', missing: ['settings'] });
+  await page.waitForSelector('text=Add your business name and UPI ID so invoices show who to pay.');
+  await page.goto(SITE + '#/invoice/' + ids.invDesign);
+  assert.equal(await page.locator('.invoice .qr').count(), 0); // no UPI ID yet
+  await page.click('#view button:has-text("Add your details")');
+  await page.fill('#s-name', 'Mec Studio');
+  await page.fill('#s-upi', 'not a upi');
+  await page.click('.sheet button:has-text("Save details")');
+  await page.waitForSelector('text=The UPI ID doesn’t look right.');
+  await page.fill('#s-upi', 'mec@ybl');
+  await page.fill('#s-terms', '15');
+  await page.click('.sheet button:has-text("Save details")');
+  await page.waitForSelector('text=The database is missing new tables or fields.'); // the table doesn't exist in this test
+});
+
+test('business details save, and set the terms for new invoices', async t => {
+  const page = await open(t, { hash: '#/invoices' });
+  await page.click('#view button:has-text("Your details")');
+  assert.equal(await page.inputValue('#s-upi'), 'mec@okhdfcbank');
+  await page.fill('#s-terms', '15');
+  await page.fill('#s-prefix', 'MEC');
+  await page.click('.sheet button:has-text("Save details")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  const st = (await rows(page, 'settings')).find(r => r.user_id === OWNER);
+  assert.deepEqual([st.payment_terms_days, st.invoice_prefix, st.business_name], [15, 'MEC', 'Mec Web Studio']);
+  await page.click('#view button:has-text("+ New invoice")');
+  assert.equal(await page.inputValue('#i-due'), '2026-11-07');
+  assert.match(await page.locator('.sheet').textContent(), /Invoice MEC\/2026-27\/001/);
+});
+
+test('an invoice prints on one A4 page, without the app around it', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invDesign });
+  await page.locator('.invoice .qr svg').waitFor();
+  await page.emulateMedia({ media: 'print' });
+  assert.equal(await page.locator('.top').isVisible(), false);
+  assert.equal(await page.locator('#view .page-head').isVisible(), false);
+  assert.equal(await page.locator('.invoice').isVisible(), true);
+  const pdf = (await page.pdf({ format: 'A4', preferCSSPageSize: true })).toString('latin1');
+  assert.equal((pdf.match(/\/Type\s*\/Page[^s]/g) || []).length, 1, 'the invoice should fit on one A4 page');
+});
+
+test('the site still works before the invoices tables exist', async t => {
+  const page = await open(t, { hash: '#/invoices', missing: ['invoices', 'settings'] });
+  await page.waitForSelector('text=No invoices yet.');
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  await card(page, 'Payment milestones').waitFor();
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '₹30,000');
+});
+
 test('the site still works before the milestones table exists', async t => {
   const page = await open(t, { hash: '#/project/' + ids.gbSite, missing: ['milestones'] });
   await card(page, 'Payment milestones').waitFor();
@@ -385,7 +588,7 @@ test('clients: add, edit, and delete with everything', async t => {
   assert.equal(await kpi(page, 'Revenue').textContent(), '₹20,000');
   await page.click('#view button:has-text("Edit")');
   await page.click('.sheet button:has-text("Delete client")');
-  await page.waitForSelector('text=This also deletes their 2 projects and 3 money entries');
+  await page.waitForSelector('text=This also deletes their 2 projects, 3 money entries and 3 invoices');
   await page.click('.sheet button.danger');
   await heading(page).filter({ hasText: 'Clients' }).waitFor();
   assert.ok(!(await rows(page, 'projects')).some(x => x.client_id === ids.edustudy));
@@ -414,12 +617,17 @@ test('unknown pages go back to a list', async t => {
 for (const colorScheme of ['light', 'dark']) {
   test('every page fits a phone screen (' + colorScheme + ')', async t => {
     const page = await open(t, { viewport: { width: 375, height: 800 }, colorScheme });
-    for (const hash of ['#/', '#/projects', '#/clients', '#/money', '#/project/' + ids.gbSite, '#/client/' + ids.edustudy]) {
+    for (const hash of ['#/', '#/projects', '#/clients', '#/money', '#/invoices', '#/invoice/' + ids.invDesign, '#/project/' + ids.gbSite, '#/client/' + ids.edustudy]) {
       await page.goto(SITE + hash);
       await page.locator('#view h1').first().waitFor();
       const [scroll, width] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
       assert.ok(scroll <= width, hash + ' scrolls sideways on a phone (' + scroll + 'px > ' + width + 'px)');
     }
+    await page.goto(SITE + '#/invoices');
+    await heading(page).filter({ hasText: 'Invoices' }).waitFor();
+    const tab = await page.locator('#tabs a[aria-current]').boundingBox();
+    assert.ok(tab && tab.x >= 0 && tab.x + tab.width <= 375, 'the current tab is scrolled into view');
+    await page.goto(SITE + '#/');
     await page.click('#view button:has-text("+ Add money")');
     const box = await page.locator('.sheet').boundingBox();
     assert.ok(box.x >= 0 && box.x + box.width <= 375, 'the add-money sheet is wider than the phone');
@@ -429,5 +637,13 @@ for (const colorScheme of ['light', 'dark']) {
     const ms = await page.locator('.sheet').boundingBox();
     assert.ok(ms.x >= 0 && ms.x + ms.width <= 375, 'the milestones sheet is wider than the phone');
     assert.ok(await page.locator('.sheet').evaluate(el => el.scrollWidth <= el.clientWidth), 'the milestones sheet scrolls sideways');
+    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoices', 'Your details'], ['#/invoice/' + ids.invDesign, 'Remind']]) {
+      await page.keyboard.press('Escape');
+      await page.goto(SITE + hash);
+      await page.click('#view button:has-text("' + button + '")');
+      const box = await page.locator('.sheet').boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= 375, 'the ' + button + ' sheet is wider than the phone');
+      assert.ok(await page.locator('.sheet').evaluate(el => el.scrollWidth <= el.clientWidth), 'the ' + button + ' sheet scrolls sideways');
+    }
   });
 }

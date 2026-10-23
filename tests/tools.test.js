@@ -43,7 +43,7 @@ test('read-only tools never change anything, and change tools say so', () => {
 test('every read tool runs on the seed ledger without errors and changes nothing', async t => {
   const { db, store } = setup(t);
   const before = JSON.stringify(store.rows);
-  const args = { search: { query: 'web' }, get_project: { project: 'GeekBoz Website' }, get_client: { client: 'Edustudy' } };
+  const args = { search: { query: 'web' }, get_project: { project: 'GeekBoz Website' }, get_client: { client: 'Edustudy' }, get_invoice: { invoice: '002' }, draft_payment_reminder: { client: 'GeekBoz' } };
   for (const tool of TOOLS.filter(x => x.annotations.readOnlyHint)) {
     const r = await tool.run(db, args[tool.name] || {});
     assert.ok(r && typeof r === 'object', tool.name);
@@ -57,7 +57,7 @@ test('every read tool runs on the seed ledger without errors and changes nothing
 
 test('read tools work on an empty ledger', async t => {
   const { db } = setup(t, { empty: true });
-  for (const tool of TOOLS.filter(x => x.annotations.readOnlyHint && !['get_project', 'get_client', 'search'].includes(x.name))) {
+  for (const tool of TOOLS.filter(x => x.annotations.readOnlyHint && !['get_project', 'get_client', 'search', 'get_invoice', 'draft_payment_reminder'].includes(x.name))) {
     const r = await tool.run(db, {});
     assert.equal(r.error, undefined, tool.name);
   }

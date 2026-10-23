@@ -6,7 +6,7 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 |---|---|---|
 | A | Financial year view (the automated tests are done) | Released |
 | B | Payment milestones | Released |
-| C | Invoices (UPI QR, TDS) and chasing payments | Not started |
+| C | Invoices (UPI QR) and chasing payments, without GST or TDS for now | Released |
 | D | Renewals and retainers | Not started |
 | E | Leads and quotes | Not started |
 | F | Tasks and time | Not started |
@@ -106,6 +106,8 @@ The automated tests are already done (`tests/`). This phase is the financial yea
 - **Check**: a payment covering milestone 1, one covering part of milestone 2, overdue dates; undo `set_milestones`; deleting a project and undoing it brings its milestones back.
 
 ### C. Invoices
+
+> **As built (Oct 2026):** the owner chose no GST, no TDS and no logo for now, so none of the tax parts below exist yet: no `gst_rate`, `gst` or `subtotal` on `invoices`, no GSTIN or SAC in `settings`, no `txns.tds`, and the invoice is titled "Invoice" with total = sum of its lines. Add them later as new nullable columns (old invoices then have no GST and tds 0, so their numbers don't change). Everything else below was built, plus: a short invoice number like "002" means this financial year's; drafts don't count as owed; deleting a project keeps its invoices with the client.
 
 - **Decisions**:
   - **Number**: `INV/2026-27/001`. Restarts each financial year, worked out as the highest existing number + 1, never reused.

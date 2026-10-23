@@ -123,7 +123,64 @@ create policy "own milestones" on public.milestones
   using (user_id = (select auth.uid()))
   with check (user_id = (select auth.uid()));
 
+-- Business details for invoices (added later): one row per user.
+create table if not exists public.settings (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  business_name text not null default '',
+  address text not null default '',
+  phone text not null default '',
+  email text not null default '',
+  upi_id text not null default '',
+  bank_details text not null default '',
+  invoice_prefix text not null default 'INV',
+  payment_terms_days integer not null default 7 check (payment_terms_days >= 0),
+  invoice_notes text not null default '',
+  created_at timestamptz not null default now()
+);
+create unique index if not exists settings_user_idx on public.settings (user_id);
+alter table public.settings enable row level security;
+drop policy if exists "own settings" on public.settings;
+create policy "own settings" on public.settings
+  for all to authenticated
+  using (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+-- Invoices (added later). Numbers like INV/2026-27/001 restart each financial year and are never reused,
+-- so invoices are cancelled, never deleted. Paid, part paid and overdue are worked out from linked payments.
+create table if not exists public.invoices (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  client_id uuid not null references public.clients(id) on delete cascade,
+  project_id uuid references public.projects(id) on delete set null,
+  milestone_id uuid references public.milestones(id) on delete set null,
+  number text not null,
+  issue_date date not null,
+  due_date date,
+  items jsonb not null default '[]',
+  total numeric(12, 2) not null check (total > 0),
+  status text not null default 'draft' check (status in ('draft', 'sent', 'paid', 'cancelled')),
+  notes text not null default '',
+  sent_at timestamptz,
+  last_reminded date,
+  reminder_count integer not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists invoices_user_idx on public.invoices (user_id);
+create unique index if not exists invoices_number_idx on public.invoices (user_id, number);
+create index if not exists invoices_client_idx on public.invoices (client_id);
+alter table public.invoices enable row level security;
+drop policy if exists "own invoices" on public.invoices;
+create policy "own invoices" on public.invoices
+  for all to authenticated
+  using (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+-- A payment can say which invoice it pays.
+alter table public.txns add column if not exists invoice_id uuid references public.invoices(id) on delete set null;
+create index if not exists txns_invoice_idx on public.txns (invoice_id);
+
 -- Every table the MCP server can change must be in this list, or its changes can't be logged and undone.
 alter table public.activity_log drop constraint if exists activity_log_table_name_check;
 alter table public.activity_log add constraint activity_log_table_name_check
-  check (table_name in ('clients', 'projects', 'txns', 'milestones'));
+  check (table_name in ('clients', 'projects', 'txns', 'milestones', 'settings', 'invoices'));

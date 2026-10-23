@@ -39,14 +39,33 @@ function sumOf(txns) {
   return { revenue: round(earned), spending: round(spent), profit: round(earned - spent) };
 }
 
+// Invoice numbers: PREFIX/2026-27/001, counting up within each financial year (April to March) and never reused.
+const fyOf = d => { const y = Number(d.slice(0, 4)), start = Number(d.slice(5, 7)) >= 4 ? y : y - 1; return start + '-' + String(start + 1).slice(2); };
+function nextInvoiceNumber(numbers, prefix, issueDate) {
+  const head = prefix + '/' + fyOf(issueDate) + '/';
+  const used = numbers.filter(n => n.startsWith(head)).map(n => Number(n.slice(head.length))).filter(Number.isFinite);
+  return head + String(Math.max(0, ...used) + 1).padStart(3, '0');
+}
+const addDays = (d, n) => new Date(Date.parse(d + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 864e5);
+// Reminders get firmer the longer an invoice is overdue.
+const reminderTone = days => days > 30 ? 'final' : days >= 7 ? 'firm' : 'friendly';
+// Indian numbers: 10 digits means +91. Returns digits only, or null when there's no usable number.
+function whatsappNumber(contact) {
+  const m = String(contact || '').match(/\+?[\d][\d\s-]{8,}\d/);
+  if (!m) return null;
+  const d = m[0].replace(/\D/g, '');
+  return d.length === 10 ? '91' + d : d.length >= 11 && d.length <= 15 ? d : null;
+}
+
 async function load(db) {
-  const [clients, projects, txns, milestones] = await Promise.all(['clients', 'projects', 'txns', 'milestones'].map(t => db.select(t)));
-  return new Ledger(clients, projects, txns, milestones);
+  const [clients, projects, txns, milestones, invoices, settings] = await Promise.all(['clients', 'projects', 'txns', 'milestones', 'invoices', 'settings'].map(t => db.select(t)));
+  return new Ledger(clients, projects, txns, milestones, invoices, settings);
 }
 
 class Ledger {
-  constructor(clients, projects, txns, milestones = []) {
-    this.raw = { clients, projects, txns, milestones };
+  constructor(clients, projects, txns, milestones = [], invoices = [], settings = []) {
+    this.raw = { clients, projects, txns, milestones, invoices, settings };
     this.clients = clients.map(r => ({ id: r.id, name: r.name, contact: r.contact || '', notes: r.notes || '', order: r.sort_order ?? 0 }));
     this.projects = projects.map(r => ({
       id: r.id, clientId: r.client_id, title: r.name, status: r.status || 'active', description: r.description || '',
@@ -55,8 +74,16 @@ class Ledger {
     }));
     this.txns = txns.map(r => ({
       id: r.id, clientId: r.client_id, projectId: r.project_id, type: r.type, amount: Number(r.amount) || 0,
-      category: r.type === 'out' ? (r.category || guessCategory(r.note)) : '', note: r.note || '', date: r.date || null
+      category: r.type === 'out' ? (r.category || guessCategory(r.note)) : '', note: r.note || '', date: r.date || null, invoiceId: r.invoice_id || null
     }));
+    this.invoices = invoices.map(r => ({
+      id: r.id, clientId: r.client_id, projectId: r.project_id || null, milestoneId: r.milestone_id || null, number: r.number, issueDate: r.issue_date, dueDate: r.due_date || null,
+      items: (Array.isArray(r.items) ? r.items : []).map(i => ({ description: i.description || '', quantity: Number(i.quantity) || 0, rate: Number(i.rate) || 0 })),
+      total: Number(r.total) || 0, status: r.status || 'draft', notes: r.notes || '', sentAt: r.sent_at || null, lastReminded: r.last_reminded || null, reminderCount: r.reminder_count || 0
+    }));
+    const st = settings[0] || {};
+    this.settings = { businessName: st.business_name || '', address: st.address || '', phone: st.phone || '', email: st.email || '', upiId: st.upi_id || '',
+      bankDetails: st.bank_details || '', invoicePrefix: st.invoice_prefix || 'INV', paymentTermsDays: st.payment_terms_days ?? 7, invoiceNotes: st.invoice_notes || '' };
     this.milestoneRows = milestones.map(r => ({ id: r.id, projectId: r.project_id, name: r.name || '', amount: Number(r.amount) || 0, dueDate: r.due_date || null, order: r.sort_order ?? 0, createdAt: r.created_at || '' }));
   }
   client(id) { return this.clients.find(c => c.id === id); }
@@ -148,7 +175,7 @@ class Ledger {
     return {
       id: t.id, date: t.date, type: t.type === 'out' ? 'money out' : 'money in', amount: t.amount,
       client: this.clientName(t.clientId), project: t.projectId ? ((this.project(t.projectId) || {}).title || 'Deleted project') : 'No project',
-      category: t.category || null, note: t.note || null
+      category: t.category || null, note: t.note || null, invoice: t.invoiceId ? (this.invoices.find(i => i.id === t.invoiceId) || {}).number : undefined
     };
   }
 
@@ -175,6 +202,7 @@ class Ledger {
       payments: tx.filter(t => t.type !== 'out').length, expenses: tx.filter(t => t.type === 'out').length,
       stillToCollect: round(owed.reduce((a, x) => a + x.stillToCollect, 0)),
       overdueFromMilestones: ms.overdueTotal, overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
+      invoices: this.invoices.length ? this.invoiceTotals() : undefined,
       pipelineFromLeads: round(this.projects.filter(p => p.status === 'lead').reduce((a, p) => a + p.quoted, 0)),
       projectsByStatus: counts, clients: this.clients.length,
       byMonth: Object.keys(byMonth).sort().map(k => ({ month: k, revenue: round(byMonth[k].revenue), spending: round(byMonth[k].spending), profit: round(byMonth[k].revenue - byMonth[k].spending) })),
@@ -205,6 +233,90 @@ class Ledger {
       note: this.txns.some(t => !t.date) ? 'Entries without a date are not in either period.' : undefined };
   }
 
+  // ---------- invoices ----------
+  // Paid when the payments linked to it reach its total. Cancelled invoices are never owed; drafts aren't sent yet.
+  invoiceState(inv) {
+    const paid = round(this.txns.filter(t => t.invoiceId === inv.id && t.type !== 'out').reduce((a, t) => a + t.amount, 0));
+    const due = round(Math.max(0, inv.total - paid)), t = todayIST();
+    const overdue = !!inv.dueDate && inv.dueDate < t;
+    const state = inv.status === 'cancelled' ? 'cancelled' : !due || inv.status === 'paid' ? 'paid' : inv.status === 'draft' ? 'draft' : overdue ? 'overdue' : paid ? 'part-paid' : 'unpaid';
+    return { paid, due: ['paid', 'cancelled'].includes(state) ? 0 : due, state, daysOverdue: state === 'overdue' ? daysBetween(inv.dueDate, t) : undefined };
+  }
+  invoiceSummary(inv) {
+    const s = this.invoiceState(inv), p = inv.projectId && this.project(inv.projectId), m = inv.milestoneId && this.milestoneRows.find(x => x.id === inv.milestoneId);
+    return { id: inv.id, number: inv.number, client: this.clientName(inv.clientId), project: p ? p.title : null, milestone: m ? m.name : undefined,
+      issueDate: inv.issueDate, dueDate: inv.dueDate, total: inv.total, paid: s.paid, due: s.due, state: s.state, daysOverdue: s.daysOverdue,
+      reminders: inv.reminderCount ? { count: inv.reminderCount, last: inv.lastReminded } : undefined };
+  }
+  // upi://pay link for the amount still due, which UPI apps open (and the QR code holds).
+  upiLink(inv) {
+    const due = this.invoiceState(inv).due;
+    if (!this.settings.upiId || !due) return null;
+    const q = { pa: this.settings.upiId, pn: this.settings.businessName || this.settings.upiId, am: due.toFixed(2), cu: 'INR', tn: inv.number };
+    return 'upi://pay?' + Object.entries(q).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+  }
+  // By id, exact number, or the end of a number ("001", "2026-27/001"); a short number means this financial year's.
+  resolveInvoice(query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return { error: 'Say which invoice: its number, like INV/2026-27/001.' };
+    let ms = this.invoices.filter(i => i.id === query || i.number.toLowerCase() === q);
+    if (!ms.length) ms = this.invoices.filter(i => i.number.toLowerCase().endsWith('/' + q.replace(/^\//, '')));
+    if (ms.length > 1) { const thisYear = ms.filter(i => i.number.includes('/' + fyOf(todayIST()) + '/')); if (thisYear.length === 1) ms = thisYear; } // "002" means this year's
+    if (ms.length === 1) return { invoice: ms[0] };
+    if (!ms.length) return { error: 'No invoice matches "' + query + '".', invoices: this.invoices.map(i => i.number) };
+    return { error: 'Several invoices match "' + query + '". Give the full number.', matches: ms.map(i => i.number) };
+  }
+  invoiceTotals() {
+    const open = this.invoices.map(i => ({ i, s: this.invoiceState(i) })).filter(x => x.s.due > 0 && x.s.state !== 'draft'); // drafts aren't owed until sent
+    const sum = xs => round(xs.reduce((a, x) => a + x.s.due, 0));
+    const overdue = open.filter(x => x.s.state === 'overdue');
+    return { unpaid: sum(open), unpaidCount: open.length, overdue: sum(overdue), overdueCount: overdue.length, drafts: this.invoices.filter(i => i.status === 'draft').length };
+  }
+  listInvoices({ filter = 'open', client } = {}) {
+    let list = this.invoices.map(i => this.invoiceSummary(i));
+    const f = String(filter).toLowerCase();
+    const keep = { open: x => x.due > 0 && x.state !== 'draft', unpaid: x => x.due > 0 && x.state !== 'draft', overdue: x => x.state === 'overdue', draft: x => x.state === 'draft',
+      paid: x => x.state === 'paid', cancelled: x => x.state === 'cancelled', all: () => true }[f];
+    if (!keep) return { error: 'filter must be one of: open, overdue, draft, paid, cancelled, all.' };
+    list = list.filter(keep);
+    if (client) { const names = new Set(this.find(this.clients, client, c => c.name).map(c => c.name)); list = list.filter(x => names.has(x.client)); }
+    list.sort((a, b) => b.issueDate.localeCompare(a.issueDate) || b.number.localeCompare(a.number));
+    return { currency: 'INR', filter: f, count: list.length, totalDue: round(list.reduce((a, x) => a + x.due, 0)), invoices: list };
+  }
+  getInvoice({ invoice }) {
+    const r = this.resolveInvoice(invoice); if (r.error) return r;
+    const inv = r.invoice, c = this.client(inv.clientId) || {};
+    return { currency: 'INR', ...this.invoiceSummary(inv), clientContact: c.contact || null, items: inv.items.map(i => ({ ...i, amount: round(i.quantity * i.rate) })), notes: inv.notes || null,
+      sentAt: inv.sentAt, upiLink: this.upiLink(inv) || undefined,
+      payments: this.txns.filter(t => t.invoiceId === inv.id).map(t => this.txnSummary(t)),
+      payTo: { name: this.settings.businessName || null, upiId: this.settings.upiId || null, bank: this.settings.bankDetails || null } };
+  }
+  // Overdue invoices grouped by client, most overdue money first.
+  listOverdue() {
+    const by = {};
+    this.invoices.forEach(i => { const s = this.invoiceState(i); if (s.state !== 'overdue') return;
+      const c = by[i.clientId] = by[i.clientId] || { client: this.clientName(i.clientId), contact: (this.client(i.clientId) || {}).contact || null, due: 0, mostDaysOverdue: 0, invoices: [] };
+      c.due = round(c.due + s.due); c.mostDaysOverdue = Math.max(c.mostDaysOverdue, s.daysOverdue); c.invoices.push(this.invoiceSummary(i)); });
+    const clients = Object.values(by).sort((a, b) => b.due - a.due);
+    return { currency: 'INR', today: todayIST(), totalOverdue: round(clients.reduce((a, c) => a + c.due, 0)), clients };
+  }
+  // The facts for a payment reminder. The assistant writes the message; nothing is sent from here.
+  reminderFacts({ invoice, client }) {
+    let invs;
+    if (invoice) { const r = this.resolveInvoice(invoice); if (r.error) return r; invs = [r.invoice]; }
+    else if (client) { const r = this.resolveClient(client); if (r.error) return r; invs = this.invoices.filter(i => i.clientId === r.client.id); }
+    else return { error: 'Say which invoice or client to remind.' };
+    const owed = invs.map(i => ({ i, s: this.invoiceState(i) })).filter(x => x.s.due > 0 && x.s.state !== 'draft');
+    if (!owed.length) return { error: 'Nothing is owed on ' + (invoice ? 'that invoice' : 'their invoices') + ' (drafts don\'t count until they are sent).' };
+    const c = this.client(owed[0].i.clientId) || {}, most = Math.max(0, ...owed.map(x => x.s.daysOverdue || 0));
+    return { currency: 'INR', client: c.name, contact: c.contact || null, whatsappNumber: whatsappNumber(c.contact) || undefined,
+      tone: reminderTone(most), toneMeaning: { friendly: 'polite nudge', firm: 'over a week late: clear and direct', final: 'over a month late: ask for a payment date' }[reminderTone(most)],
+      totalDue: round(owed.reduce((a, x) => a + x.s.due, 0)),
+      invoices: owed.map(({ i, s }) => ({ number: i.number, due: s.due, dueDate: i.dueDate, daysOverdue: s.daysOverdue || 0, upiLink: this.upiLink(i) || undefined, timesReminded: i.reminderCount, lastReminded: i.lastReminded })),
+      payTo: { name: this.settings.businessName || null, upiId: this.settings.upiId || null, bank: this.settings.bankDetails || null },
+      note: 'Write the message for the user to send themselves; this server never sends messages. Afterwards, offer to call log_reminder.' };
+  }
+
   // Things worth acting on: overdue work, money owed, leads, and gaps in the data.
   attention() {
     const t = todayIST();
@@ -218,6 +330,7 @@ class Ledger {
       dueWithinAWeek: open.filter(p => p.dueDate && p.dueDate >= t && p.dueDate <= soon).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate })),
       overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
       stillToCollect: this.owed().map(o => ({ ...o, lastPayment: lastPaid(this.project(o.projectId)) })),
+      overdueInvoices: this.invoices.map(i => this.invoiceSummary(i)).filter(x => x.state === 'overdue').sort((a, b) => b.daysOverdue - a.daysOverdue),
       openLeads: this.projects.filter(p => p.status === 'lead').map(p => ({ id: p.id, project: this.projectLabel(p), quoted: p.quoted, added: (p.createdAt || '').slice(0, 10) })),
       onHold: this.projects.filter(p => p.status === 'paused').map(p => ({ id: p.id, project: this.projectLabel(p) })),
       missingInfo: {
@@ -290,4 +403,4 @@ class Ledger {
   }
 }
 
-module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, todayIST, guessCategory, round };
+module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, todayIST, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber };
