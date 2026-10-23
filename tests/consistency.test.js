@@ -144,7 +144,8 @@ test('the currency list is the same on every table that carries money (and the d
   }
   assert.deepEqual(schema.settings.checks.default_currency.values, list);
   assert.ok(!schema.milestones.columns.currency, 'milestones use their project\'s currency; they don\'t store one');
-  // TODO(step 2 / step 3): also compare with CURRENCIES in api/_lib/ledger.js and index.html.
+  assert.deepEqual(ledger.CURRENCIES, list, 'api/_lib/ledger.js CURRENCIES vs schema.sql');
+  // TODO(step 3): also compare with CURRENCIES in index.html.
 });
 
 test('regional settings default to what the app assumed before: rupees, April, India time', () => {

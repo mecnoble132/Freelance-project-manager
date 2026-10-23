@@ -1,17 +1,20 @@
 // The MCP tools: what the assistant sees (name, description, input schema) and what each one runs.
-const { load, PERIODS, CATEGORIES } = require('./ledger');
+const { load, PERIODS, CATEGORIES, CURRENCIES } = require('./ledger');
 const W = require('./writes');
 
-const period = { type: 'string', enum: PERIODS, description: 'Time period. Defaults to all_time. this_fy / last_fy are Indian financial years (April to March). Ignored when from or to is given.' };
+const period = { type: 'string', enum: PERIODS, description: 'Time period. Defaults to all_time. this_fy / last_fy are the user\'s financial years (they choose the start month; April by default). Ignored when from or to is given.' };
 const day = d => ({ type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$', description: d + ' (YYYY-MM-DD).' });
 const str = d => ({ type: 'string', description: d });
 const obj = (properties, required) => ({ type: 'object', properties, ...(required ? { required } : {}), additionalProperties: false });
+// Money tools work in one currency at a time; amounts in different currencies are never added together.
+const currencyIn = { type: 'string', enum: CURRENCIES, description: 'Which currency to report in. Defaults to the user\'s default currency (or the only one in use). The answer lists any other currencies they have money in.' };
 const confirm = { type: 'boolean', description: 'Leave out first: the tool then only shows what would be deleted. Pass true only after the user has seen that and agreed.' };
 const statusIn = { type: 'string', enum: ['lead', 'active', 'paused', 'done'], description: 'lead, active (in progress), paused (on hold) or done.' };
 const projectRef = { project: str('Project id, title, or "client title" like "GeekBoz Website".'), client: str('Client name, to pick between projects with the same title.') };
 const projectFieldSchema = {
   status: statusIn,
-  quoted: { type: 'number', minimum: 0, description: 'Agreed price in rupees.' },
+  quoted: { type: 'number', minimum: 0, description: 'Agreed price, in the project\'s currency.' },
+  currency: { type: 'string', enum: CURRENCIES, description: 'The project\'s currency. Defaults to the user\'s default currency. It can only be changed while the project has no payments, expenses, invoices, renewals or milestones.' },
   start_date: str('Start date (YYYY-MM-DD). Empty string clears it.'),
   due_date: str('Due date (YYYY-MM-DD). Empty string clears it.'),
   preview_url: str('Preview / staging link. Empty string clears it.'),
@@ -20,10 +23,11 @@ const projectFieldSchema = {
   description: str('What the project is: scope, tech stack, notes.')
 };
 const entrySchema = {
-  amount: { type: 'number', minimum: 0.01, description: 'Amount in rupees.' },
+  amount: { type: 'number', minimum: 0.01, description: 'Amount, in the currency of its project or invoice (or of currency when there is neither).' },
+  currency: { type: 'string', enum: CURRENCIES, description: 'Only for money without a project or invoice; defaults to the user\'s default currency. With a project or invoice it must match theirs, or it is refused.' },
   client: str('Client name or id. Not needed when project is given and unambiguous.'),
   project: str('Project title (or "client title"). Leave out for money not tied to a project.'),
-  date: day('Date the money moved. Defaults to today (India time)'),
+  date: day('Date the money moved. Defaults to today (in the user\'s time zone)'),
   note: str('What it was for, e.g. "Advance", "Final payment", ".com renewal".')
 };
 
@@ -38,11 +42,11 @@ const TOOLS = [
   // ---------- read ----------
   { name: 'get_summary', title: 'Business summary', annotations: RO,
     description: 'Revenue, spending, profit and margin for a period, plus money still to collect, projects by status, month-by-month totals, spending by category and the most profitable projects. Start here for questions about how the business is doing.',
-    inputSchema: obj({ period, from: day('Start date, inclusive'), to: day('End date, inclusive') }),
+    inputSchema: obj({ period, from: day('Start date, inclusive'), to: day('End date, inclusive'), currency: currencyIn }),
     run: read((l, a) => l.summary(a)) },
   { name: 'compare_periods', title: 'Compare two periods', annotations: RO,
     description: 'Revenue, spending and profit for two periods side by side, with the change. Defaults to this month vs last month.',
-    inputSchema: obj({ preset: { type: 'string', enum: ['month_vs_last_month', 'fy_vs_last_fy', 'year_vs_last_year', 'last_12_vs_previous_12'], description: 'fy_vs_last_fy = this financial year (April to March) vs the last one.' },
+    inputSchema: obj({ preset: { type: 'string', enum: ['month_vs_last_month', 'fy_vs_last_fy', 'year_vs_last_year', 'last_12_vs_previous_12'], description: 'fy_vs_last_fy = this financial year vs the last one.' }, currency: currencyIn,
       a_from: day('Current period start'), a_to: day('Current period end'), b_from: day('Previous period start'), b_to: day('Previous period end') }),
     run: read((l, a) => l.comparePeriods(a)) },
   { name: 'get_attention_items', title: 'What needs attention', annotations: RO,
@@ -59,16 +63,16 @@ const TOOLS = [
     description: 'Everything about one project, including its payment milestones (paid, part-paid, overdue or unpaid) and every payment and expense on it (with their ids).',
     inputSchema: obj(projectRef, ['project']), run: read((l, a) => l.getProject(a)) },
   { name: 'list_clients', title: 'List clients', annotations: RO,
-    description: 'Every client with id, number of projects, revenue, spending, profit and money still to collect.',
-    inputSchema: obj({}), run: read(l => l.listClients()) },
+    description: 'Every client with id, number of projects, revenue, spending, profit and money still to collect, in one currency.',
+    inputSchema: obj({ currency: currencyIn }), run: read((l, a) => l.listClients(a)) },
   { name: 'get_client', title: 'Client details', annotations: RO,
     description: 'One client with contact, notes, totals, their projects and every payment and expense (with ids).',
-    inputSchema: obj({ client: str('Client id or name.') }, ['client']), run: read((l, a) => l.getClient(a)) },
+    inputSchema: obj({ client: str('Client id or name.'), currency: currencyIn }, ['client']), run: read((l, a) => l.getClient(a)) },
   { name: 'list_transactions', title: 'List payments and expenses', annotations: RO,
     description: 'Payments (money in) and expenses (money out) with their ids, newest first, with totals for what matched. Filter by type, period or dates, client, project and expense category.',
     inputSchema: obj({ type: { type: 'string', enum: ['in', 'out'], description: 'in = payments, out = expenses.' }, period, from: day('Start date, inclusive'), to: day('End date, inclusive'),
       client: str('Client name, or part of it.'), project: str('Project title, or part of it.'), category: { type: 'string', enum: CATEGORIES },
-      limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Defaults to 100.' } }),
+      limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Defaults to 100.' }, currency: currencyIn }),
     run: read((l, a) => l.listTransactions(a)) },
   { name: 'list_recent_changes', title: 'Recent changes', annotations: RO,
     description: 'Changes made through this assistant connection, newest first, with their change_id and whether they were undone.',
@@ -94,7 +98,7 @@ const TOOLS = [
       client_contact: str('Contact for a new client.'), ...projectFieldSchema, allow_duplicate: { type: 'boolean' } }, ['title', 'client']),
     run: W.createProject },
   { name: 'update_project', title: 'Edit a project', annotations: EDIT,
-    description: 'Changes any project fields: title, status, quoted price, dates, links, description, or moves it to another client (its money moves with it). Only the fields given are changed.',
+    description: 'Changes any project fields: title, status, quoted price, currency (only while nothing is attached to it), dates, links, description, or moves it to another client (its money moves with it). Only the fields given are changed.',
     inputSchema: obj({ ...projectRef, title: str('New title.'), move_to_client: str('Client to move the project to.'), ...projectFieldSchema }, ['project']),
     run: W.updateProject },
   { name: 'delete_project', title: 'Delete a project', annotations: DELETE,
@@ -105,7 +109,7 @@ const TOOLS = [
     inputSchema: obj({ ...projectRef,
       split: { type: 'array', items: { type: 'number', exclusiveMinimum: 0 }, description: 'Percentages of the quoted price that add up to 100, e.g. [50, 30, 20]. Named Advance, Payment 2, ..., Final payment.' },
       due_dates: { type: 'array', items: { type: 'string' }, description: 'With split: due dates (YYYY-MM-DD) for each part, in order. Optional.' },
-      milestones: { type: 'array', items: obj({ name: str('e.g. "Advance", "Design approved", "Launch".'), amount: { type: 'number', minimum: 0.01, description: 'Amount in rupees.' }, due_date: day('Due date') }, ['amount']),
+      milestones: { type: 'array', items: obj({ name: str('e.g. "Advance", "Design approved", "Launch".'), amount: { type: 'number', minimum: 0.01, description: 'Amount, in the project\'s currency.' }, due_date: day('Due date') }, ['amount']),
         description: 'Instead of split: the milestones in the order they are paid.' } }, ['project']),
     run: W.setMilestones },
 
@@ -125,7 +129,7 @@ const TOOLS = [
   { name: 'update_transaction', title: 'Edit a payment or expense', annotations: EDIT,
     description: 'Changes a money entry by id: amount, date, note, type, category, or which client/project it belongs to. Pass project as an empty string to detach it from its project.',
     inputSchema: obj({ id: str('Entry id, from list_transactions or get_project.'), type: { type: 'string', enum: ['in', 'out'] }, amount: entrySchema.amount,
-      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project,
+      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project, currency: entrySchema.currency,
       invoice: str('Invoice number this payment is for. Empty string unlinks it, which reopens the invoice.') }, ['id']),
     run: W.updateTransaction },
   { name: 'delete_transactions', title: 'Delete payments or expenses', annotations: DELETE,
@@ -134,19 +138,23 @@ const TOOLS = [
 
   // ---------- invoices ----------
   { name: 'get_settings', title: 'Business details', annotations: RO,
-    description: 'The business details printed on invoices (name, address, phone, email, UPI ID, bank details), the invoice number prefix, payment terms in days and default invoice notes.',
+    description: 'The business details printed on invoices (name, address, phone, email, UPI ID, bank details), the invoice number prefix, payment terms in days, default invoice notes, and the regional settings: default currency, financial year start month, time zone and locale.',
     inputSchema: obj({}), run: W.getSettings },
   { name: 'update_settings', title: 'Edit business details', annotations: EDIT,
-    description: 'Changes the business details printed on invoices. Only the fields given are changed.',
+    description: 'Changes the business details printed on invoices and the regional settings (default currency, financial year start month, time zone, locale). Only the fields given are changed.',
     inputSchema: obj({ business_name: str('Name shown at the top of invoices.'), address: str('Postal address.'), phone: str('Phone.'), email: str('Email.'),
-      upi_id: str('UPI ID clients pay to, like name@okhdfcbank. Used for the QR code.'), bank_details: str('Account name, number, IFSC and bank, for bank transfers.'),
+      upi_id: str('UPI ID clients pay to, like name@okhdfcbank. Used for the QR code on rupee invoices.'), bank_details: str('Account name, number, IFSC and bank, for bank transfers.'),
       invoice_prefix: str('Start of invoice numbers, like INV (INV/2026-27/001).'), payment_terms_days: { type: 'integer', minimum: 0, maximum: 365, description: 'Days until an invoice is due.' },
-      invoice_notes: str('Default notes printed on new invoices.') }),
+      invoice_notes: str('Default notes printed on new invoices.'),
+      default_currency: { type: 'string', enum: CURRENCIES, description: 'Currency for new projects and for money without a project.' },
+      fy_start_month: { type: 'integer', minimum: 1, maximum: 12, description: 'Month the financial year starts: 1 = January (the calendar year), 4 = April.' },
+      timezone: str('IANA time zone, like Asia/Kolkata, Europe/London or America/New_York. Decides what "today" is.'),
+      locale: { type: 'string', enum: ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'], description: 'How numbers and dates are written.' } }),
     run: W.updateSettings },
   { name: 'create_invoice', title: 'Create an invoice', annotations: WRITE,
-    description: 'Creates an invoice for a client, numbered automatically (INV/2026-27/001, restarting each financial year). Either invoice a project milestone (its unpaid amount) or give line items. It starts as a draft unless mark_sent is true. No tax is added.',
-    inputSchema: obj({ client: entrySchema.client, project: str('Project title (or "client title").'), milestone: str('Milestone name on the project, to invoice what is left of it.'),
-      items: { type: 'array', minItems: 1, maxItems: 50, items: obj({ description: str('What the line is for.'), quantity: { type: 'number', exclusiveMinimum: 0, description: 'Defaults to 1.' }, rate: { type: 'number', minimum: 0.01, description: 'Price per unit in rupees.' } }, ['description', 'rate']),
+    description: 'Creates an invoice for a client, numbered automatically (like INV/2026-27/001, restarting each financial year). Either invoice a project milestone (its unpaid amount) or give line items. The invoice is in its project\'s currency (or the one given, or the user\'s default when there is no project). It starts as a draft unless mark_sent is true. No tax is added.',
+    inputSchema: obj({ client: entrySchema.client, project: str('Project title (or "client title").'), currency: entrySchema.currency, milestone: str('Milestone name on the project, to invoice what is left of it.'),
+      items: { type: 'array', minItems: 1, maxItems: 50, items: obj({ description: str('What the line is for.'), quantity: { type: 'number', exclusiveMinimum: 0, description: 'Defaults to 1.' }, rate: { type: 'number', minimum: 0.01, description: 'Price per unit, in the invoice\'s currency.' } }, ['description', 'rate']),
         description: 'Line items. Not needed when invoicing a milestone.' },
       issue_date: day('Issue date. Defaults to today'), due_date: day('Due date. Defaults to the issue date plus the payment terms'), notes: str('Notes printed on the invoice. Defaults to the settings.'),
       mark_sent: { type: 'boolean', description: 'True if the user has already sent it to the client.' }, allow_duplicate: { type: 'boolean', description: 'Allow a second open invoice for the same milestone.' } }),
@@ -158,39 +166,39 @@ const TOOLS = [
       issue_date: day('Issue date'), due_date: str('Due date (YYYY-MM-DD). Empty string clears it.'), notes: str('Notes printed on the invoice.') }, ['invoice']),
     run: W.updateInvoice },
   { name: 'list_invoices', title: 'List invoices', annotations: RO,
-    description: 'Invoices with number, client, project, dates, total, paid, amount due and state (draft, unpaid, part-paid, overdue, paid, cancelled). Defaults to open ones (sent and not fully paid).',
-    inputSchema: obj({ filter: { type: 'string', enum: ['open', 'overdue', 'draft', 'paid', 'cancelled', 'all'] }, client: str('Client name, or part of it.') }),
+    description: 'Invoices with number, client, project, dates, total, paid, amount due and state (draft, unpaid, part-paid, overdue, paid, cancelled). Defaults to open ones (sent and not fully paid). Lists one currency at a time.',
+    inputSchema: obj({ filter: { type: 'string', enum: ['open', 'overdue', 'draft', 'paid', 'cancelled', 'all'] }, client: str('Client name, or part of it.'), currency: currencyIn }),
     run: read((l, a) => l.listInvoices(a)) },
   { name: 'get_invoice', title: 'Invoice details', annotations: RO,
     description: 'One invoice in full: line items, payments linked to it, amount due, reminders so far, and the UPI payment link.',
     inputSchema: obj({ invoice: str('Invoice number or its last part, like "001".') }, ['invoice']), run: read((l, a) => l.getInvoice(a)) },
   { name: 'list_overdue', title: 'Overdue invoices by client', annotations: RO,
-    description: 'Every overdue invoice, grouped by client with the total owed, days overdue and when they were last reminded. Use it for "who owes me money?".',
-    inputSchema: obj({}), run: read(l => l.listOverdue()) },
+    description: 'Every overdue invoice, grouped by client with the total owed, days overdue and when they were last reminded. Use it for "who owes me money?". Totals are per currency.',
+    inputSchema: obj({ currency: currencyIn }), run: read((l, a) => l.listOverdue(a)) },
   { name: 'draft_payment_reminder', title: 'Facts for a payment reminder', annotations: RO,
     description: 'The facts for a payment reminder to one client or for one invoice: amounts, due dates, days overdue, times already reminded, UPI link, WhatsApp number and a suggested tone (friendly, firm after 7 days, final after 30). Write the message from these for the user to send themselves; nothing is sent.',
-    inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.') }), run: read((l, a) => l.reminderFacts(a)) },
+    inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.'), currency: currencyIn }), run: read((l, a) => l.reminderFacts(a)) },
   { name: 'log_reminder', title: 'Log that a reminder was sent', annotations: WRITE,
     description: 'Records that the user reminded a client about an invoice (or all their unpaid invoices), so the next reminder can be firmer. Call it after the user says they sent the message.',
-    inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.') }), run: W.logReminder },
+    inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.'), currency: currencyIn }), run: W.logReminder },
 
   // ---------- renewals ----------
   { name: 'list_renewals', title: 'Renewals and retainers', annotations: RO,
-    description: 'Services you renew for clients (domains, hosting, SSL, maintenance, email): what is overdue, what renews soon, every active service with its cost, price, cycle and next renewal, and yearly revenue, cost and profit from them.',
-    inputSchema: obj({ within_days: { type: 'integer', minimum: 0, maximum: 366, description: 'How far ahead counts as due. Defaults to 30.' }, include_inactive: { type: 'boolean' } }),
+    description: 'Services you renew for clients (domains, hosting, SSL, maintenance, email): what is overdue, what renews soon, every active service with its cost, price, cycle and next renewal, and yearly revenue, cost and profit from them (in one currency).',
+    inputSchema: obj({ within_days: { type: 'integer', minimum: 0, maximum: 366, description: 'How far ahead counts as due. Defaults to 30.' }, include_inactive: { type: 'boolean' }, currency: currencyIn }),
     run: read((l, a) => l.listRenewals(a)) },
   { name: 'add_service', title: 'Add a service to renew', annotations: WRITE,
     description: 'Adds something that renews on a cycle for a client: a domain, hosting, SSL, a maintenance plan, email, or other. Cost is what you pay each cycle, price is what you charge.',
-    inputSchema: obj({ client: entrySchema.client, project: str('Project it belongs to (optional).'), name: str('e.g. "geekboz.in" or "Hostinger Business".'),
+    inputSchema: obj({ client: entrySchema.client, project: str('Project it belongs to (optional). The service is then in the project\'s currency.'), currency: entrySchema.currency, name: str('e.g. "geekboz.in" or "Hostinger Business".'),
       kind: { type: 'string', enum: ['domain', 'hosting', 'ssl', 'maintenance', 'email', 'other'] }, provider: str('e.g. GoDaddy, Hostinger.'),
-      cost: { type: 'number', minimum: 0, description: 'What you pay each cycle, in rupees.' }, price: { type: 'number', minimum: 0, description: 'What you charge the client each cycle, in rupees.' },
+      cost: { type: 'number', minimum: 0, description: 'What you pay each cycle, in the service\'s currency.' }, price: { type: 'number', minimum: 0, description: 'What you charge the client each cycle, in the service\'s currency.' },
       cycle: { type: 'string', enum: ['monthly', 'quarterly', 'yearly'], description: 'Defaults to yearly.' }, next_renewal: day('Next renewal date'),
       auto_renew: { type: 'boolean' }, notes: str('Anything to remember, like where the login is kept (never the password).') }, ['name', 'next_renewal']),
     run: W.addService },
   { name: 'update_service', title: 'Edit a service', annotations: EDIT,
     description: 'Changes a service\'s details, its next renewal date, or stops it (active: false). Only the fields given are changed.',
     inputSchema: obj({ service: str('Service name or id.'), client: str('Client name, to pick between services with the same name.'), name: str('New name.'),
-      kind: { type: 'string', enum: ['domain', 'hosting', 'ssl', 'maintenance', 'email', 'other'] }, provider: str('Provider.'), cost: { type: 'number', minimum: 0 }, price: { type: 'number', minimum: 0 },
+      kind: { type: 'string', enum: ['domain', 'hosting', 'ssl', 'maintenance', 'email', 'other'] }, provider: str('Provider.'), cost: { type: 'number', minimum: 0 }, price: { type: 'number', minimum: 0 }, currency: entrySchema.currency,
       cycle: { type: 'string', enum: ['monthly', 'quarterly', 'yearly'] }, next_renewal: day('Next renewal date'), auto_renew: { type: 'boolean' }, active: { type: 'boolean', description: 'false stops tracking it.' },
       project: str('Project it belongs to. Empty string detaches it.'), notes: str('Notes.') }, ['service']),
     run: W.updateService },
@@ -224,7 +232,7 @@ const TOOLS = [
   { name: 'log_time', title: 'Log time on a project', annotations: WRITE,
     description: 'Logs time worked on a project: give minutes or hours (not both), a date (defaults to today) and an optional note. The project then shows its total hours and what it earned per hour.',
     inputSchema: obj({ ...projectRef, minutes: { type: 'integer', minimum: 1, maximum: 1440 }, hours: { type: 'number', exclusiveMinimum: 0, maximum: 24, description: 'Instead of minutes, e.g. 1.5.' },
-      date: day('Day the work was done. Defaults to today (India time)'), note: str('What was done.') }, ['project']),
+      date: day('Day the work was done. Defaults to today (in the user\'s time zone)'), note: str('What was done.') }, ['project']),
     run: W.logTime },
 
   // ---------- undo ----------
@@ -233,10 +241,10 @@ const TOOLS = [
     inputSchema: obj({ change_id: str('From a tool result or list_recent_changes. Leave out to undo the latest change.') }), run: W.undoChange }
 ];
 
-const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense. All money is in Indian rupees (INR); dates are YYYY-MM-DD in India time.
+const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense. Every project, payment, expense, invoice and renewal has its own currency (INR, USD, EUR, GBP, AUD, CAD, SGD, AED, NZD, CHF, JPY or ZAR); a project's money is always in the project's currency. Amounts in different currencies are never added together: the money tools report one currency at a time (the \`currency\` input, else the user's default) and list any other currencies in otherCurrencies, so mention them to the user. Dates are YYYY-MM-DD in the user's own time zone.
 Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. A project's price can be split into payment milestones; its money received covers them in order, so each is paid, part-paid, unpaid or overdue (past its due date and not fully paid). Some older entries have no date; they only count under all_time.
-The financial year runs April to March (FY 2026–27 is 2026-04-01 to 2027-03-31). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
-Invoices: numbered like INV/2026-27/001 per financial year, never deleted (cancel instead). A payment linked to an invoice (add_payment with invoice) counts towards it; an invoice is paid when those reach its total, and overdue when past its due date and not paid. No tax (GST or TDS) is used yet. To chase money, use list_overdue and draft_payment_reminder, write the message yourself for the user to send, then log_reminder once they have sent it. This server never sends messages.
+The financial year starts on the first of a month the user chose in their settings (April by default: FY 2026–27 is 2026-04-01 to 2027-03-31; January means the calendar year, FY 2026). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
+Invoices: numbered like INV/2026-27/001 per financial year (INV/2026/001 for a January start), never deleted (cancel instead). A payment linked to an invoice (add_payment with invoice) counts towards it; an invoice is paid when those reach its total, and overdue when past its due date and not paid. No tax (GST or TDS) is used yet. To chase money, use list_overdue and draft_payment_reminder, write the message yourself for the user to send, then log_reminder once they have sent it. This server never sends messages.
 Renewals: services (domains, hosting, SSL, maintenance, email) renew on a monthly, quarterly or yearly cycle with a cost (what the user pays) and a price (what the client pays). renew_service logs the cost, invoices the price and moves the date in one change; it is two-step like deletes.
 Tasks and time: each project has a checklist of tasks (title, optional due date, done or not) and logged time (minutes, a date, a note). A project's earned per hour is the money received divided by the hours logged, and only exists once time is logged. Never store client passwords in tasks or notes.
 Changing data:

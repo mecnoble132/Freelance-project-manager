@@ -1,7 +1,7 @@
 // Changes made through the MCP server. Each tool call is one "change": every row it inserts, updates or deletes
 // is recorded in activity_log under one batch id, so the whole call can be listed and undone.
 const crypto = require('crypto');
-const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory, round, nextInvoiceNumber, addDays, addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY } = require('./ledger');
+const { load, Ledger, CATEGORIES, STATUSES, CURRENCIES, LOCALES, validTimezone, guessCategory, round, nextInvoiceNumber, addDays, addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY } = require('./ledger');
 
 class Invalid extends Error {}
 const fail = msg => { throw new Invalid(msg); };
@@ -9,7 +9,7 @@ const fail = msg => { throw new Invalid(msg); };
 // ---------- input cleaning ----------
 const text = (v, max = 5000) => v == null ? '' : String(v).trim().slice(0, max);
 function money(v, { allowZero = false, label = 'Amount' } = {}) {
-  const n = typeof v === 'string' ? Number(v.replace(/[₹,\s]/g, '')) : Number(v);
+  const n = typeof v === 'string' ? Number(v.replace(/[\p{Sc},\s]/gu, '')) : Number(v); // "₹1,500", "$20" and "1 500" all work
   if (!Number.isFinite(n) || n < 0 || (!allowZero && n === 0)) fail(label + ' must be a number' + (allowZero ? ' of 0 or more' : ' above 0') + '.');
   if (n > 1e10) fail(label + ' is too large.');
   return Math.round(n * 100) / 100;
@@ -39,6 +39,11 @@ function category(v, note) {
   if (v == null || v === '') return guessCategory(note);
   const c = CATEGORIES.find(x => x.toLowerCase() === String(v).trim().toLowerCase());
   if (!c) fail('Category must be one of: ' + CATEGORIES.join(', ') + '.');
+  return c;
+}
+function currency(v, label = 'Currency') {
+  const c = text(v).toUpperCase();
+  if (!CURRENCIES.includes(c)) fail(label + ' must be one of: ' + CURRENCIES.join(', ') + '.');
   return c;
 }
 const given = v => v !== undefined;
@@ -78,6 +83,13 @@ class Change {
 const done = (message, extra, batch) => ({ done: true, message, ...extra, change_id: batch, undo: 'If this was a mistake, call undo_change with this change_id.' });
 const confirmFirst = (what, details) => ({ confirmation_required: true, message: 'Nothing has been changed yet. Show the user exactly what will be ' + what + ', and call this tool again with confirm: true only after they agree.', ...details });
 
+// moneyIn / moneyOut as plain numbers for one currency, or { INR: n, USD: n } when the entries are in several.
+function moneyTotals(txns) {
+  const curs = [...new Set(txns.map(t => t.currency || 'INR'))], sum = type => c => txns.filter(t => (t.type === 'out') === (type === 'out') && (t.currency || 'INR') === c).reduce((s, t) => s + Number(t.amount), 0);
+  const total = type => curs.length > 1 ? Object.fromEntries(curs.map(c => [c, sum(type)(c)])) : sum(type)(curs[0] || 'INR');
+  return { moneyIn: total('in'), moneyOut: total('out'), ...(curs.length === 1 ? { currency: curs[0] } : {}) };
+}
+
 // ---------- clients ----------
 async function createClient(db, a) {
   const L = await load(db);
@@ -112,7 +124,7 @@ async function deleteClient(db, a) {
   const tasks = L.raw.tasks.filter(t => projects.some(p => p.id === t.project_id)), timeEntries = L.raw.time_entries.filter(e => projects.some(p => p.id === e.project_id));
   if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length, invoices: invoices.map(i => i.number), services: services.map(x => x.name),
     tasks: tasks.length, timeEntries: timeEntries.length,
-    moneyIn: txns.filter(t => t.type !== 'out').reduce((s, t) => s + Number(t.amount), 0), moneyOut: txns.filter(t => t.type === 'out').reduce((s, t) => s + Number(t.amount), 0) });
+    ...moneyTotals(txns) });
   const ch = new Change(db, 'Deleted client ' + c.name + ' with ' + projects.length + ' projects and ' + txns.length + ' entries'); await ch.ready();
   for (const t of txns) await ch.remove('txns', t);
   for (const i of invoices) await ch.remove('invoices', i);
@@ -137,6 +149,7 @@ function projectFields(a, partial) {
   if (given(a.live_url)) f.live_url = url(a.live_url, 'The live site link');
   if (given(a.github_url)) f.github_url = url(a.github_url, 'The GitHub link');
   if (given(a.description)) f.description = text(a.description);
+  if (given(a.currency)) f.currency = currency(a.currency);
   if (!partial) f.name || fail('Give the project a title.');
   return f;
 }
@@ -156,7 +169,7 @@ async function createProject(db, a) {
   const dupe = L.projects.find(p => p.clientId === clientId && p.title.toLowerCase() === f.name.toLowerCase());
   if (dupe && !a.allow_duplicate) return { error: clientName + ' already has a project called "' + dupe.title + '". Update that one, or pass allow_duplicate: true for a separate project.', existing: { id: dupe.id } };
   const [p] = await ch.insert('projects', { client_id: clientId, name: f.name, status: f.status || 'active', quoted: f.quoted || 0,
-    start_date: f.start_date ?? null, due_date: f.due_date ?? null, preview_url: f.preview_url || '', live_url: f.live_url || '', github_url: f.github_url || '', description: f.description || '' });
+    currency: f.currency || L.settings.defaultCurrency, start_date: f.start_date ?? null, due_date: f.due_date ?? null, preview_url: f.preview_url || '', live_url: f.live_url || '', github_url: f.github_url || '', description: f.description || '' });
   return done('Added project "' + p.name + '" for ' + clientName + (newClient ? ' (new client)' : '') + '.', { project: { id: p.id, title: p.name, client: clientName, newClient } }, await ch.commit());
 }
 
@@ -166,6 +179,12 @@ async function updateProject(db, a) {
   const before = L.raw.projects.find(x => x.id === r.project.id);
   const patch = projectFields(a, true);
   if (given(a.move_to_client) && a.move_to_client) { const c = L.resolveClient(a.move_to_client); if (c.error) return c; patch.client_id = c.client.id; }
+  if (patch.currency === before.currency) delete patch.currency;
+  if (patch.currency) { // a project's currency is locked once anything is attached to it
+    const attached = [['payments or expenses', L.raw.txns], ['invoices', L.raw.invoices], ['renewals', L.raw.services], ['milestones', L.raw.milestones]]
+      .map(([what, rows]) => [what, rows.filter(x => x.project_id === before.id).length]).filter(([, n]) => n);
+    if (attached.length) fail('"' + before.name + '" is in ' + before.currency + ' and already has ' + attached.map(([what, n]) => n + ' ' + what).join(', ') + ', so its currency can\'t change. Create a new project in ' + patch.currency + ' instead.');
+  }
   if (!Object.keys(patch).length) fail('Say what to change on the project.');
   const ch = new Change(db, 'Edited project ' + before.name); await ch.ready();
   if (patch.client_id && patch.client_id !== before.client_id) {
@@ -223,8 +242,11 @@ function entryRow(L, e, i) {
   const place = inv ? { client_id: inv.clientId, project_id: inv.projectId, label: inv.number + ' (' + L.clientName(inv.clientId) + ')' } : placeEntry(L, e);
   if (place.error) return { ...place, error: where + place.error, error_only: true };
   const note = text(e.note, 500);
-  return { row: { client_id: place.client_id, project_id: place.project_id, type, amount: money(e.amount, { label: where + 'Amount' }),
-    category: type === 'out' ? category(e.category, note) : '', note, date: e.date === undefined ? todayIST() : date(e.date, where + 'Date'), ...(inv ? { invoice_id: inv.id } : {}) }, label: place.label };
+  // Money has the currency of its project (or its invoice); without either it takes the one given, else the user's default.
+  const proj = place.project_id && L.project(place.project_id), want = e.currency == null || e.currency === '' ? null : currency(e.currency, where + 'Currency'), have = inv ? inv.currency : proj ? proj.currency : null;
+  if (have && want && want !== have) fail(where + (inv ? inv.number : 'That project') + ' is in ' + have + '; this ' + (type === 'in' ? 'payment' : 'expense') + ' is in ' + want + '. Money has to be in the same currency as its ' + (inv ? 'invoice' : 'project') + '.');
+  return { row: { client_id: place.client_id, project_id: place.project_id, type, amount: money(e.amount, { label: where + 'Amount' }), currency: have || want || L.settings.defaultCurrency,
+    category: type === 'out' ? category(e.category, note) : '', note, date: e.date === undefined ? L.today() : date(e.date, where + 'Date'), ...(inv ? { invoice_id: inv.id } : {}) }, label: place.label };
 }
 
 async function addTransactions(db, entries, summaryWord) {
@@ -234,11 +256,13 @@ async function addTransactions(db, entries, summaryWord) {
   const built = entries.map((e, i) => entryRow(L, e, entries.length > 1 ? i : undefined));
   const bad = built.filter(b => b.error);
   if (bad.length) return { error: 'Nothing was saved. ' + bad.map(b => b.error).join(' '), details: bad.map(({ error_only, row, label, ...b }) => b) };
-  const sum = t => built.filter(b => b.row.type === t).reduce((s, b) => s + b.row.amount, 0);
+  const by = {}; // currency → { in, out }; amounts in different currencies are written side by side, never added
+  built.forEach(b => { const x = by[b.row.currency] = by[b.row.currency] || { in: 0, out: 0 }; x[b.row.type] += b.row.amount; });
+  const parts = Object.entries(by).flatMap(([c, x]) => [x.in && L.fmt(x.in, c) + ' in', x.out && L.fmt(x.out, c) + ' out'].filter(Boolean));
   const ch = new Change(db, summaryWord || ('Added ' + built.length + ' money entries')); await ch.ready();
   const rows = await ch.insert('txns', built.map(b => b.row));
   const L2 = new Ledger(L.raw.clients, L.raw.projects, rows, [], L.raw.invoices);
-  return done((built.length === 1 ? 'Saved ' : 'Saved ' + built.length + ' entries: ') + (sum('in') ? '₹' + sum('in').toLocaleString('en-IN') + ' in' : '') + (sum('in') && sum('out') ? ', ' : '') + (sum('out') ? '₹' + sum('out').toLocaleString('en-IN') + ' out' : '') + '.',
+  return done((built.length === 1 ? 'Saved ' : 'Saved ' + built.length + ' entries: ') + parts.join(', ') + '.',
     { entries: rows.map(r => L2.txnSummary(L2.txns.find(t => t.id === r.id))) }, await ch.commit());
 }
 
@@ -262,6 +286,12 @@ async function updateTransaction(db, a) {
     if (given(a.project) && !a.project) { patch.project_id = null; if (a.client) { const c = L.resolveClient(a.client); if (c.error) return c; patch.client_id = c.client.id; } }
     else { const place = placeEntry(L, { project: a.project, client: a.client }); if (place.error) return place; patch.client_id = place.client_id; patch.project_id = place.project_id; }
   }
+  if (given(a.currency)) patch.currency = currency(a.currency);
+  // Money and its project (or invoice) always share a currency, whichever of them is being changed.
+  const now = { project_id: 'project_id' in patch ? patch.project_id : before.project_id, invoice_id: 'invoice_id' in patch ? patch.invoice_id : before.invoice_id, currency: patch.currency || before.currency || 'INR' };
+  const proj = now.project_id && L.project(now.project_id), inv = now.invoice_id && L.invoices.find(i => i.id === now.invoice_id), word = type === 'in' ? 'payment' : 'expense';
+  if (proj && proj.currency !== now.currency) fail('That project is in ' + proj.currency + '; this ' + word + ' is in ' + now.currency + '. Money has to be in the same currency as its project.');
+  if (inv && inv.currency !== now.currency) fail(inv.number + ' is in ' + inv.currency + '; this ' + word + ' is in ' + now.currency + '. A payment has to be in the same currency as its invoice.');
   if (!Object.keys(patch).length) fail('Say what to change on the entry.');
   const ch = new Change(db, 'Edited money entry'); await ch.ready();
   const t = await ch.update('txns', before, patch);
@@ -300,7 +330,7 @@ async function setMilestones(db, a) {
     if (Math.abs(parts.reduce((x, y) => x + y, 0) - 100) > 0.01) fail('The split must add up to 100, like [50, 30, 20].');
     const dues = Array.isArray(a.due_dates) ? a.due_dates : [];
     let used = 0;
-    // Whole rupees, with the last part taking what's left so the total is exactly the quote.
+    // Whole units of the currency, with the last part taking what's left so the total is exactly the quote.
     list = parts.map((x, i) => { const amount = i === parts.length - 1 ? round(quoted - used) : Math.round(quoted * x / 100); used += amount;
       return { name: milestoneName(i, parts.length), amount, due_date: dues[i] ? date(dues[i], 'Due date ' + (i + 1)) : null }; });
   } else {
@@ -318,9 +348,10 @@ async function setMilestones(db, a) {
   for (const m of old) await ch.remove('milestones', m);
   const rows = list.length ? await ch.insert('milestones', list.map((m, i) => ({ project_id: p.id, name: m.name, amount: m.amount, due_date: m.due_date, sort_order: i }))) : [];
   const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones.filter(m => m.project_id !== p.id).concat(rows));
-  return done(list.length ? 'Set ' + list.length + ' milestones on ' + label + ', totalling ₹' + total.toLocaleString('en-IN') + '.' : 'Removed the milestones from ' + label + '.',
+  const cur = r.project.currency;
+  return done(list.length ? 'Set ' + list.length + ' milestones on ' + label + ', totalling ' + L.fmt(total, cur) + '.' : 'Removed the milestones from ' + label + '.',
     { project: label, milestones: now.milestones(now.project(p.id)),
-      warning: list.length && quoted && total !== quoted ? 'The milestones add up to ₹' + total.toLocaleString('en-IN') + ', but the quote is ₹' + quoted.toLocaleString('en-IN') + '. Tell the user.' : undefined }, await ch.commit());
+      warning: list.length && quoted && total !== quoted ? 'The milestones add up to ' + L.fmt(total, cur) + ', but the quote is ' + L.fmt(quoted, cur) + '. Tell the user.' : undefined }, await ch.commit());
 }
 
 // ---------- settings ----------
@@ -333,11 +364,17 @@ async function updateSettings(db, a) {
   if (given(a.upi_id) && patch.upi_id && !/^[\w.\-]{2,256}@[a-z][a-z0-9.\-]{1,64}$/i.test(patch.upi_id)) fail('The UPI ID doesn\'t look right. It looks like name@bank, e.g. yourname@okhdfcbank.');
   if (given(a.invoice_prefix) && !/^[A-Za-z0-9-]{1,10}$/.test(patch.invoice_prefix)) fail('The invoice prefix can only have letters, numbers and dashes (up to 10), like INV.');
   if (given(a.payment_terms_days)) { const n = Number(a.payment_terms_days); if (!Number.isInteger(n) || n < 0 || n > 365) fail('Payment terms must be a whole number of days from 0 to 365.'); patch.payment_terms_days = n; }
-  if (!Object.keys(patch).length) fail('Say what to change: ' + Object.keys(SETTING_FIELDS).join(', ') + ' or payment_terms_days.');
+  if (given(a.default_currency)) patch.default_currency = currency(a.default_currency, 'The default currency');
+  if (given(a.fy_start_month)) { const n = Number(a.fy_start_month); if (!Number.isInteger(n) || n < 1 || n > 12) fail('The financial year start month must be a whole number from 1 (January) to 12 (December).'); patch.fy_start_month = n; }
+  if (given(a.timezone)) { patch.timezone = text(a.timezone, 100); if (validTimezone(patch.timezone) !== patch.timezone || !patch.timezone) fail('That time zone isn\'t recognised. Use a name like Asia/Kolkata, Europe/London or America/New_York.'); }
+  if (given(a.locale)) { patch.locale = text(a.locale, 10); if (!LOCALES.includes(patch.locale)) fail('locale must be one of: ' + LOCALES.join(', ') + '.'); }
+  if (!Object.keys(patch).length) fail('Say what to change: ' + Object.keys(SETTING_FIELDS).join(', ') + ', payment_terms_days, default_currency, fy_start_month, timezone or locale.');
   const ch = new Change(db, 'Edited business details'); await ch.ready();
   if (before) await ch.update('settings', before, patch); else await ch.insert('settings', patch);
   const now = await load(db);
-  return done('Saved ' + Object.keys(patch).join(', ') + '.', { settings: now.settings }, await ch.commit());
+  const fyChanged = patch.fy_start_month !== undefined && patch.fy_start_month !== L.settings.fyStartMonth;
+  return done('Saved ' + Object.keys(patch).join(', ') + '.', { settings: now.settings,
+    note: fyChanged ? 'New invoices are numbered under the new financial year\'s label and restart at 001. Existing invoice numbers don\'t change.' : undefined }, await ch.commit());
 }
 
 // ---------- invoices ----------
@@ -370,19 +407,22 @@ async function createInvoice(db, a) {
     const open = L.invoices.find(i => i.milestoneId === milestone.id && L.invoiceState(i).state !== 'cancelled');
     if (open && !a.allow_duplicate) return { error: open.number + ' already invoices this milestone. Use it, cancel it first, or pass allow_duplicate: true.' };
   }
+  const proj = projectId && L.project(projectId), want = a.currency == null || a.currency === '' ? null : currency(a.currency);
+  if (proj && want && want !== proj.currency) fail(L.projectLabel(proj) + ' is in ' + proj.currency + ', so its invoices are too. Leave the currency out, or create the invoice without the project.');
+  const cur = proj ? proj.currency : want || L.settings.defaultCurrency;
   items = given(a.items) ? invoiceItems(a.items) : milestone ? [{ description: L.project(projectId).title + ' — ' + milestone.name, quantity: 1, rate: milestone.left }] : invoiceItems(a.items);
-  const issue = given(a.issue_date) ? date(a.issue_date, 'Issue date') : todayIST();
+  const issue = given(a.issue_date) ? date(a.issue_date, 'Issue date') : L.today();
   if (!issue) fail('The issue date can\'t be empty.');
   const due = given(a.due_date) ? date(a.due_date, 'Due date') : addDays(issue, L.settings.paymentTermsDays);
   if (due && due < issue) fail('The due date can\'t be before the issue date.');
-  const number = nextInvoiceNumber(L.invoices.map(i => i.number), L.settings.invoicePrefix, issue);
-  const total = itemsTotal(items); if (!(total > 0)) fail('The invoice total must be above ₹0.');
+  const number = nextInvoiceNumber(L.invoices.map(i => i.number), L.settings.invoicePrefix, issue, L.settings.fyStartMonth);
+  const total = itemsTotal(items); if (!(total > 0)) fail('The invoice total must be above ' + L.fmt(0, cur) + '.');
   const ch = new Change(db, 'Created invoice ' + number); await ch.ready();
-  const [row] = await ch.insert('invoices', { client_id: clientId, project_id: projectId, milestone_id: milestone ? milestone.id : null, number, issue_date: issue, due_date: due,
+  const [row] = await ch.insert('invoices', { client_id: clientId, project_id: projectId, currency: cur, milestone_id: milestone ? milestone.id : null, number, issue_date: issue, due_date: due,
     items, total, status: a.mark_sent ? 'sent' : 'draft', notes: given(a.notes) ? text(a.notes, 2000) : L.settings.invoiceNotes, sent_at: a.mark_sent ? new Date().toISOString() : null });
   const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones, L.raw.invoices.concat([row]), L.raw.settings);
-  return done('Created ' + number + ' for ' + L.clientName(clientId) + ', ₹' + total.toLocaleString('en-IN') + (a.mark_sent ? ', marked as sent.' : ' (draft).'),
-    { invoice: now.getInvoice({ invoice: row.id }), setupNeeded: L.settings.upiId && L.settings.businessName ? undefined : 'Business name or UPI ID isn\'t set yet; offer to add them with update_settings so the invoice shows who to pay.' }, await ch.commit());
+  return done('Created ' + number + ' for ' + L.clientName(clientId) + ', ' + L.fmt(total, cur) + (a.mark_sent ? ', marked as sent.' : ' (draft).'),
+    { invoice: now.getInvoice({ invoice: row.id }), setupNeeded: (cur === 'INR' ? L.settings.upiId : L.settings.bankDetails) && L.settings.businessName ? undefined : 'Business name or ' + (cur === 'INR' ? 'UPI ID' : 'bank details') + ' isn\'t set yet; offer to add them with update_settings so the invoice shows who to pay.' }, await ch.commit());
 }
 
 async function updateInvoice(db, a) {
@@ -395,7 +435,7 @@ async function updateInvoice(db, a) {
     patch.status = s; if (s === 'sent' && !before.sent_at) patch.sent_at = new Date().toISOString();
   }
   if (before.status === 'cancelled' && patch.status !== 'draft' && patch.status !== 'sent') fail(before.number + ' is cancelled. Set status to sent or draft to reopen it first.');
-  if (given(a.items)) { patch.items = invoiceItems(a.items); patch.total = itemsTotal(patch.items); if (!(patch.total > 0)) fail('The invoice total must be above ₹0.'); }
+  if (given(a.items)) { patch.items = invoiceItems(a.items); patch.total = itemsTotal(patch.items); if (!(patch.total > 0)) fail('The invoice total must be above ' + L.fmt(0, before.currency) + '.'); }
   if (given(a.issue_date)) { patch.issue_date = date(a.issue_date, 'Issue date'); if (!patch.issue_date) fail('The issue date can\'t be empty.'); }
   if (given(a.due_date)) patch.due_date = date(a.due_date, 'Due date');
   if (given(a.notes)) patch.notes = text(a.notes, 2000);
@@ -411,7 +451,7 @@ async function logReminder(db, a) {
   const L = await load(db);
   const facts = L.reminderFacts(a); if (facts.error) return facts;
   const rows = facts.invoices.map(f => L.raw.invoices.find(i => i.number === f.number));
-  const t = todayIST(), ch = new Change(db, 'Logged a reminder to ' + facts.client); await ch.ready();
+  const t = L.today(), ch = new Change(db, 'Logged a reminder to ' + facts.client); await ch.ready();
   for (const r of rows) await ch.update('invoices', r, { last_reminded: t, reminder_count: (r.reminder_count || 0) + 1 });
   return done('Logged a reminder to ' + facts.client + ' for ' + rows.map(r => r.number).join(', ') + '.', {}, await ch.commit());
 }
@@ -422,6 +462,7 @@ function serviceFields(L, a, partial, clientId) {
   if (given(a.name)) { f.name = text(a.name, 200); if (!f.name) fail('Give the service a name, like "geekboz.in" or "Hostinger Business".'); }
   if (given(a.kind)) { f.kind = text(a.kind).toLowerCase(); if (!SERVICE_KINDS.includes(f.kind)) fail('kind must be one of: ' + SERVICE_KINDS.join(', ') + '.'); }
   if (given(a.provider)) f.provider = text(a.provider, 200);
+  if (given(a.currency)) f.currency = currency(a.currency);
   if (given(a.cost)) f.cost = money(a.cost, { allowZero: true, label: 'Cost' });
   if (given(a.price)) f.price = money(a.price, { allowZero: true, label: 'Price' });
   if (given(a.cycle)) { f.cycle = text(a.cycle).toLowerCase(); if (!CYCLE_MONTHS[f.cycle]) fail('cycle must be monthly, quarterly or yearly.'); }
@@ -443,8 +484,10 @@ async function addService(db, a) {
   if (text(a.project) && !text(a.client)) { const r = L.resolveProject(a.project); if (r.error) return r; clientId = r.project.clientId; }
   else { const r = L.resolveClient(a.client); if (r.error) return r; clientId = r.client.id; }
   const f = serviceFields(L, a, false, clientId);
+  const proj = f.project_id && L.project(f.project_id);
+  if (proj && f.currency && f.currency !== proj.currency) fail(L.projectLabel(proj) + ' is in ' + proj.currency + ', so its renewals are too. Leave the currency out, or add the service without the project.');
   const ch = new Change(db, 'Added service ' + f.name); await ch.ready();
-  const [row] = await ch.insert('services', { client_id: clientId, project_id: f.project_id ?? null, kind: f.kind || 'other', name: f.name, provider: f.provider || '',
+  const [row] = await ch.insert('services', { client_id: clientId, project_id: f.project_id ?? null, currency: proj ? proj.currency : f.currency || L.settings.defaultCurrency, kind: f.kind || 'other', name: f.name, provider: f.provider || '',
     cost: f.cost || 0, price: f.price || 0, cycle: f.cycle || 'yearly', next_renewal: f.next_renewal, auto_renew: !!f.auto_renew, active: f.active !== false, notes: f.notes || '' });
   const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, [], [], [], [row]);
   return done('Added ' + row.name + ' for ' + L.clientName(clientId) + ', renewing ' + niceDate(row.next_renewal) + '.', { service: now.serviceSummary(now.services[0]) }, await ch.commit());
@@ -455,6 +498,8 @@ async function updateService(db, a) {
   const r = L.resolveService(a.service, a.client); if (r.error) return r;
   const before = L.raw.services.find(x => x.id === r.service.id);
   const patch = serviceFields(L, a, true, before.client_id);
+  const finalProject = 'project_id' in patch ? patch.project_id : before.project_id, proj = finalProject && L.project(finalProject), cur = patch.currency || before.currency || 'INR';
+  if (proj && proj.currency !== cur) fail(L.projectLabel(proj) + ' is in ' + proj.currency + ' but this service is in ' + cur + '. A renewal has to be in the same currency as its project.');
   if (!Object.keys(patch).length) fail('Say what to change on the service.');
   const ch = new Change(db, 'Edited service ' + before.name); await ch.ready();
   const row = await ch.update('services', before, patch);
@@ -469,19 +514,19 @@ async function renewService(db, a) {
   const r = L.resolveService(a.service, a.client); if (r.error) return r;
   const svc = r.service, row = L.raw.services.find(x => x.id === svc.id);
   if (!svc.active) return { error: svc.name + ' is inactive. Set active: true with update_service first.' };
-  const t = todayIST(), next = addMonths(svc.nextRenewal, CYCLE_MONTHS[svc.cycle]), client = L.clientName(svc.clientId);
+  const t = L.today(), next = addMonths(svc.nextRenewal, CYCLE_MONTHS[svc.cycle]), client = L.clientName(svc.clientId);
   const expense = a.log_expense !== false && svc.cost > 0, invoice = a.create_invoice !== false && svc.price > 0;
-  const number = invoice ? nextInvoiceNumber(L.invoices.map(i => i.number), L.settings.invoicePrefix, t) : null;
+  const number = invoice ? nextInvoiceNumber(L.invoices.map(i => i.number), L.settings.invoicePrefix, t, L.settings.fyStartMonth) : null;
   const period = niceDate(svc.nextRenewal) + ' to ' + niceDate(addDays(next, -1));
   const steps = [
-    expense ? 'Log ₹' + svc.cost.toLocaleString('en-IN') + ' spent on ' + svc.name + ' (' + KIND_CATEGORY[svc.kind] + ').' : null,
-    invoice ? 'Create draft invoice ' + number + ' to ' + client + ' for ₹' + svc.price.toLocaleString('en-IN') + '.' : null,
+    expense ? 'Log ' + L.fmt(svc.cost, svc.currency) + ' spent on ' + svc.name + ' (' + KIND_CATEGORY[svc.kind] + ').' : null,
+    invoice ? 'Create draft invoice ' + number + ' to ' + client + ' for ' + L.fmt(svc.price, svc.currency) + '.' : null,
     'Move the next renewal from ' + niceDate(svc.nextRenewal) + ' to ' + niceDate(next) + '.'].filter(Boolean);
   if (a.confirm !== true) return { confirmation_required: true, message: 'Nothing has been changed yet. Show the user these steps, and call again with confirm: true only after they agree.', service: svc.name, client, steps };
   const ch = new Change(db, 'Renewed ' + svc.name + ' for ' + client); await ch.ready();
-  if (expense) await ch.insert('txns', { client_id: svc.clientId, project_id: svc.projectId, type: 'out', amount: svc.cost, category: KIND_CATEGORY[svc.kind], note: svc.name + ' renewal', date: t });
+  if (expense) await ch.insert('txns', { client_id: svc.clientId, project_id: svc.projectId, currency: svc.currency, type: 'out', amount: svc.cost, category: KIND_CATEGORY[svc.kind], note: svc.name + ' renewal', date: t });
   let inv = null;
-  if (invoice) [inv] = await ch.insert('invoices', { client_id: svc.clientId, project_id: svc.projectId, milestone_id: null, number, issue_date: t, due_date: addDays(t, L.settings.paymentTermsDays),
+  if (invoice) [inv] = await ch.insert('invoices', { client_id: svc.clientId, project_id: svc.projectId, currency: svc.currency, milestone_id: null, number, issue_date: t, due_date: addDays(t, L.settings.paymentTermsDays),
     items: [{ description: svc.name + ' — ' + svc.kind + ' renewal (' + period + ')', quantity: 1, rate: svc.price }], total: svc.price, status: 'draft', notes: L.settings.invoiceNotes, sent_at: null });
   await ch.update('services', row, { next_renewal: next });
   return done('Renewed ' + svc.name + ': ' + steps.join(' '), { invoice: inv ? inv.number : undefined, nextRenewal: next }, await ch.commit());
@@ -542,7 +587,7 @@ async function logTime(db, a) {
   const minutes = given(a.minutes) ? Number(a.minutes) : Math.round(Number(a.hours) * 60);
   if (!Number.isInteger(minutes) || minutes <= 0) fail('The time must be a whole number of minutes above 0 (or hours that come to at least a minute).');
   if (minutes > 1440) fail('One entry can be at most 24 hours. Split longer work across days.');
-  const label = L.projectLabel(r.project), d = a.date === undefined ? todayIST() : date(a.date, 'Date');
+  const label = L.projectLabel(r.project), d = a.date === undefined ? L.today() : date(a.date, 'Date');
   if (!d) fail('The date can\'t be empty.');
   const ch = new Change(db, 'Logged ' + niceDuration(minutes) + ' on ' + label); await ch.ready();
   const [row] = await ch.insert('time_entries', { project_id: r.project.id, date: d, minutes, note: text(a.note, 500) });

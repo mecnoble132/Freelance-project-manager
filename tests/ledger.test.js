@@ -3,13 +3,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers/setup');
 const { ids, OWNER } = require('./helpers/seed');
-const { load, todayIST } = require('../api/_lib/ledger');
+const { load, todayIn } = require('../api/_lib/ledger');
 
 test('today is worked out in India time', t => {
   setup(t);
-  assert.equal(todayIST(), '2026-10-23');
+  assert.equal(todayIn('Asia/Kolkata'), '2026-10-23');
   t.mock.timers.setTime(Date.parse('2026-10-23T19:00:00Z')); // 00:30 on the 24th in India
-  assert.equal(todayIST(), '2026-10-24');
+  assert.equal(todayIn('Asia/Kolkata'), '2026-10-24');
 });
 
 test('summary for all time', async t => {

@@ -3,28 +3,44 @@
 const STATUS_LABELS = { lead: 'Lead', active: 'In progress', paused: 'On hold', done: 'Done' };
 const STATUSES = Object.keys(STATUS_LABELS);
 const CATEGORIES = ['Domain', 'Hosting', 'Software & plugins', 'Design assets', 'Contractor', 'Ads & marketing', 'Travel', 'Other'];
+// The fixed list of currencies. Keep identical to the check constraints in supabase/schema.sql and to CURRENCIES in index.html.
+const CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'];
+const LOCALES = ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'];
+// What a user without saved settings gets, which is how the app behaved before settings existed.
+const DEFAULTS = { currency: 'INR', fyStartMonth: 4, timezone: 'Asia/Kolkata', locale: 'en-IN' };
 const PERIODS = ['this_month', 'last_month', 'last_12_months', 'this_fy', 'last_fy', 'this_year', 'last_year', 'all_time'];
 
 const guessCategory = note => CATEGORIES.find(c => c.toLowerCase() === String(note || '').trim().toLowerCase()) || 'Other';
 const round = n => Math.round(n * 100) / 100;
+const curOf = r => CURRENCIES.includes(r.currency) ? r.currency : DEFAULTS.currency; // rows from before currencies existed are rupees
 const pad = n => String(n).padStart(2, '0');
 
-// Dates are YYYY-MM-DD strings in India time, which is where the work and the money happen.
-function todayIST() { return new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); }
+// Dates are YYYY-MM-DD strings. "Today" is the date where the user is, from their time zone (not a fixed offset).
+const validTimezone = tz => { try { new Intl.DateTimeFormat('en-CA', { timeZone: tz || DEFAULTS.timezone }); return tz || DEFAULTS.timezone; } catch (e) { return DEFAULTS.timezone; } };
+function todayIn(tz) { return new Intl.DateTimeFormat('en-CA', { timeZone: validTimezone(tz), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
+// "₹20,000", "$1,200.50", "¥3,000": the amount in its own currency, written the way the user's locale writes it (cents only when there are some).
+function formatMoney(amount, currency = DEFAULTS.currency, locale = DEFAULTS.locale) {
+  try { return new Intl.NumberFormat(locale, { style: 'currency', currency, minimumFractionDigits: currency === 'JPY' || Number.isInteger(amount) ? 0 : 2, maximumFractionDigits: currency === 'JPY' ? 0 : 2 }).format(amount); }
+  catch (e) { return currency + ' ' + amount; }
+}
 function monthStart(y, m) { const d = new Date(Date.UTC(y, m - 1, 1)); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-01'; }
 function monthEnd(y, m) { const d = new Date(Date.UTC(y, m, 0)); return d.toISOString().slice(0, 10); }
-// Indian financial years run April to March: FY 2026–27 is 2026-04-01 to 2027-03-31.
-const fyLabel = y => 'FY ' + y + '–' + String(y + 1).slice(2);
-const fyRange = y => ({ from: y + '-04-01', to: (y + 1) + '-03-31', label: fyLabel(y) });
+// A financial year starts on the 1st of the user's chosen month (default April): with April, FY 2026–27 is 2026-04-01 to 2027-03-31.
+// A January start is the calendar year, labelled FY 2026.
+const fyStartYear = (d, sm = DEFAULTS.fyStartMonth) => { const y = Number(d.slice(0, 4)); return Number(d.slice(5, 7)) >= sm ? y : y - 1; };
+const fyLabel = (y, sm = DEFAULTS.fyStartMonth) => sm === 1 ? 'FY ' + y : 'FY ' + y + '–' + String(y + 1).slice(2);
+const fyRange = (y, sm = DEFAULTS.fyStartMonth) => ({ from: y + '-' + pad(sm) + '-01', to: sm === 1 ? y + '-12-31' : monthEnd(y + 1, sm - 1), label: fyLabel(y, sm) });
 
-function periodRange(period, from, to) {
+// regional is { timezone, fyStartMonth }; without it the owner's old defaults apply.
+function periodRange(period, from, to, regional = {}) {
   if (from || to) return { from: from || null, to: to || null, label: (from || 'start') + ' to ' + (to || 'today') };
-  const t = todayIST(), y = Number(t.slice(0, 4)), m = Number(t.slice(5, 7));
+  const sm = regional.fyStartMonth || DEFAULTS.fyStartMonth;
+  const t = todayIn(regional.timezone), y = Number(t.slice(0, 4)), m = Number(t.slice(5, 7));
   switch (period) {
     case 'this_month': return { from: monthStart(y, m), to: null, label: 'This month' };
     case 'last_month': return { from: monthStart(y, m - 1), to: monthEnd(y, m - 1), label: 'Last month' };
-    case 'this_fy': return fyRange(m >= 4 ? y : y - 1);
-    case 'last_fy': return fyRange(m >= 4 ? y - 1 : y - 2);
+    case 'this_fy': return fyRange(fyStartYear(t, sm), sm);
+    case 'last_fy': return fyRange(fyStartYear(t, sm) - 1, sm);
     case 'this_year': return { from: y + '-01-01', to: null, label: 'This year' };
     case 'last_year': return { from: (y - 1) + '-01-01', to: (y - 1) + '-12-31', label: 'Last year' };
     case 'last_12_months': return { from: monthStart(y, m - 11), to: null, label: 'Last 12 months' };
@@ -39,10 +55,10 @@ function sumOf(txns) {
   return { revenue: round(earned), spending: round(spent), profit: round(earned - spent) };
 }
 
-// Invoice numbers: PREFIX/2026-27/001, counting up within each financial year (April to March) and never reused.
-const fyOf = d => { const y = Number(d.slice(0, 4)), start = Number(d.slice(5, 7)) >= 4 ? y : y - 1; return start + '-' + String(start + 1).slice(2); };
-function nextInvoiceNumber(numbers, prefix, issueDate) {
-  const head = prefix + '/' + fyOf(issueDate) + '/';
+// Invoice numbers: PREFIX/2026-27/001 (PREFIX/2026/001 for a January start), counting up within each financial year and never reused.
+const fyOf = (d, sm = DEFAULTS.fyStartMonth) => { const start = fyStartYear(d, sm); return sm === 1 ? String(start) : start + '-' + String(start + 1).slice(2); };
+function nextInvoiceNumber(numbers, prefix, issueDate, sm = DEFAULTS.fyStartMonth) {
+  const head = prefix + '/' + fyOf(issueDate, sm) + '/';
   const used = numbers.filter(n => n.startsWith(head)).map(n => Number(n.slice(head.length))).filter(Number.isFinite);
   return head + String(Math.max(0, ...used) + 1).padStart(3, '0');
 }
@@ -81,28 +97,68 @@ class Ledger {
     this.raw = { clients, projects, txns, milestones, invoices, settings, services, tasks, time_entries: timeEntries };
     this.tasks = tasks.map(r => ({ id: r.id, projectId: r.project_id, title: r.title || '', done: !!r.done, dueDate: r.due_date || null, order: r.sort_order ?? 0, doneAt: r.done_at || null, createdAt: r.created_at || '' }));
     this.timeEntries = timeEntries.map(r => ({ id: r.id, projectId: r.project_id, date: r.date || null, minutes: Number(r.minutes) || 0, note: r.note || '' }));
-    this.services = services.map(r => ({ id: r.id, clientId: r.client_id, projectId: r.project_id || null, kind: r.kind || 'other', name: r.name || '', provider: r.provider || '',
+    this.services = services.map(r => ({ id: r.id, clientId: r.client_id, projectId: r.project_id || null, currency: curOf(r), kind: r.kind || 'other', name: r.name || '', provider: r.provider || '',
       cost: Number(r.cost) || 0, price: Number(r.price) || 0, cycle: r.cycle || 'yearly', nextRenewal: r.next_renewal, autoRenew: !!r.auto_renew, active: r.active !== false, notes: r.notes || '' }));
     this.clients = clients.map(r => ({ id: r.id, name: r.name, contact: r.contact || '', notes: r.notes || '', order: r.sort_order ?? 0 }));
     this.projects = projects.map(r => ({
-      id: r.id, clientId: r.client_id, title: r.name, status: r.status || 'active', description: r.description || '',
+      id: r.id, clientId: r.client_id, currency: curOf(r), title: r.name, status: r.status || 'active', description: r.description || '',
       quoted: Number(r.quoted) || 0, previewUrl: r.preview_url || '', liveUrl: r.live_url || '', githubUrl: r.github_url || '',
       startDate: r.start_date || null, dueDate: r.due_date || null, createdAt: r.created_at
     }));
     this.txns = txns.map(r => ({
-      id: r.id, clientId: r.client_id, projectId: r.project_id, type: r.type, amount: Number(r.amount) || 0,
+      id: r.id, clientId: r.client_id, projectId: r.project_id, currency: curOf(r), type: r.type, amount: Number(r.amount) || 0,
       category: r.type === 'out' ? (r.category || guessCategory(r.note)) : '', note: r.note || '', date: r.date || null, invoiceId: r.invoice_id || null
     }));
     this.invoices = invoices.map(r => ({
-      id: r.id, clientId: r.client_id, projectId: r.project_id || null, milestoneId: r.milestone_id || null, number: r.number, issueDate: r.issue_date, dueDate: r.due_date || null,
+      id: r.id, clientId: r.client_id, projectId: r.project_id || null, currency: curOf(r), milestoneId: r.milestone_id || null, number: r.number, issueDate: r.issue_date, dueDate: r.due_date || null,
       items: (Array.isArray(r.items) ? r.items : []).map(i => ({ description: i.description || '', quantity: Number(i.quantity) || 0, rate: Number(i.rate) || 0 })),
       total: Number(r.total) || 0, status: r.status || 'draft', notes: r.notes || '', sentAt: r.sent_at || null, lastReminded: r.last_reminded || null, reminderCount: r.reminder_count || 0
     }));
     const st = settings[0] || {};
     this.settings = { businessName: st.business_name || '', address: st.address || '', phone: st.phone || '', email: st.email || '', upiId: st.upi_id || '',
-      bankDetails: st.bank_details || '', invoicePrefix: st.invoice_prefix || 'INV', paymentTermsDays: st.payment_terms_days ?? 7, invoiceNotes: st.invoice_notes || '' };
+      bankDetails: st.bank_details || '', invoicePrefix: st.invoice_prefix || 'INV', paymentTermsDays: st.payment_terms_days ?? 7, invoiceNotes: st.invoice_notes || '',
+      defaultCurrency: CURRENCIES.includes(st.default_currency) ? st.default_currency : DEFAULTS.currency,
+      fyStartMonth: st.fy_start_month >= 1 && st.fy_start_month <= 12 ? st.fy_start_month : DEFAULTS.fyStartMonth,
+      timezone: validTimezone(st.timezone), locale: LOCALES.includes(st.locale) ? st.locale : DEFAULTS.locale };
     this.milestoneRows = milestones.map(r => ({ id: r.id, projectId: r.project_id, name: r.name || '', amount: Number(r.amount) || 0, dueDate: r.due_date || null, order: r.sort_order ?? 0, createdAt: r.created_at || '' }));
   }
+  today() { return todayIn(this.settings.timezone); }
+  regional() { return { timezone: this.settings.timezone, fyStartMonth: this.settings.fyStartMonth }; }
+  period(period, from, to) { return periodRange(period, from, to, this.regional()); }
+  fmt(amount, currency) { return formatMoney(amount, currency || this.cur || this.settings.defaultCurrency, this.settings.locale); }
+
+  // ---------- currencies ----------
+  // Amounts in different currencies are never added together. Totals are worked out per currency: a "scoped" ledger
+  // holds only one currency's money (this.cur is set), and the tools that total money run on one.
+  currenciesInUse() {
+    const set = new Set([...this.projects, ...this.txns, ...this.invoices, ...this.services].map(r => r.currency));
+    return [...set].sort((a, b) => (a === this.settings.defaultCurrency ? -1 : b === this.settings.defaultCurrency ? 1 : a.localeCompare(b)));
+  }
+  // { currency } for a ledger in one currency, { currencies } when there are several (every row then says its own).
+  currencyTag() {
+    if (this.cur) return { currency: this.cur };
+    const c = this.currenciesInUse();
+    return c.length > 1 ? { currencies: c } : { currency: c[0] || this.settings.defaultCurrency };
+  }
+  scoped(cur) {
+    const keep = r => curOf(r) === cur, projects = this.raw.projects.filter(keep), ids = new Set(projects.map(p => p.id));
+    const L = new Ledger(this.raw.clients, projects, this.raw.txns.filter(keep), this.raw.milestones.filter(m => ids.has(m.project_id)), this.raw.invoices.filter(keep), this.raw.settings,
+      this.raw.services.filter(keep), this.raw.tasks.filter(t => ids.has(t.project_id)), this.raw.time_entries.filter(e => ids.has(e.project_id)));
+    L.cur = cur;
+    return L;
+  }
+  // Runs a money tool in one currency: the one asked for, else the one the rows in question share, else the only one in use, else the default.
+  // The answer says which, and lists the user's other currencies so nothing is silently left out.
+  inCurrency(a, run, hint = []) {
+    if (this.cur) return run(this);
+    const used = this.currenciesInUse(), hinted = [...new Set(hint.map(r => r.currency))];
+    const cur = a.currency ? String(a.currency).trim().toUpperCase() : hinted.length === 1 ? hinted[0] : used.length === 1 ? used[0] : this.settings.defaultCurrency;
+    if (!CURRENCIES.includes(cur)) return { error: 'currency must be one of: ' + CURRENCIES.join(', ') + '.' };
+    const out = run(this.scoped(cur));
+    const others = used.filter(c => c !== cur).map(c => { const L = this.scoped(c), s = sumOf(L.txns); return { currency: c, ...s, stillToCollect: round(L.owed().reduce((x, o) => x + o.stillToCollect, 0)) }; });
+    return out.error || !others.length ? out : { ...out, otherCurrencies: others, otherCurrenciesNote: 'These figures are only for ' + cur + '. Pass currency to see another; amounts in different currencies are never added together.' };
+  }
+
   client(id) { return this.clients.find(c => c.id === id); }
   clientName(id) { return (this.client(id) || {}).name || 'Unknown client'; }
   project(id) { return this.projects.find(p => p.id === id); }
@@ -151,7 +207,7 @@ class Ledger {
   // A project's money in pays off its milestones in order. One is overdue when its due date has passed and it isn't
   // fully paid; leads aren't owed anything yet, so their milestones are never overdue.
   milestones(p) {
-    const t = todayIST();
+    const t = this.today();
     let left = sumOf(this.txns.filter(x => x.projectId === p.id)).revenue;
     return this.milestoneRows.filter(m => m.projectId === p.id).sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt)).map(m => {
       const paid = round(Math.min(m.amount, left)); left = round(left - paid);
@@ -165,24 +221,24 @@ class Ledger {
 
   // Overdue milestones, and unpaid ones due in the next 7 days, across every project.
   milestoneAlerts() {
-    const t = todayIST(), soon = new Date(Date.now() + 5.5 * 3600e3 + 7 * 864e5).toISOString().slice(0, 10);
+    const t = this.today(), soon = addDays(t, 7);
     const overdue = [], dueWithinAWeek = [];
     this.projects.forEach(p => this.milestones(p).forEach(m => {
-      const item = { projectId: p.id, project: this.projectLabel(p), milestone: m.name, amount: m.amount, left: m.left, dueDate: m.dueDate };
+      const item = { projectId: p.id, project: this.projectLabel(p), milestone: m.name, amount: m.amount, left: m.left, dueDate: m.dueDate, currency: p.currency };
       if (m.state === 'overdue') overdue.push({ ...item, daysOverdue: m.daysOverdue });
       else if (m.left && p.status !== 'lead' && m.dueDate && m.dueDate >= t && m.dueDate <= soon) dueWithinAWeek.push(item);
     }));
     overdue.sort((a, b) => a.dueDate.localeCompare(b.dueDate)); dueWithinAWeek.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-    return { overdue, dueWithinAWeek, overdueTotal: round(overdue.reduce((a, m) => a + m.left, 0)) };
+    return { overdue, dueWithinAWeek, overdueTotal: round(overdue.reduce((a, m) => a + m.left, 0)) }; // overdueTotal is only meaningful on a one-currency ledger
   }
 
   projectSummary(p) {
     const ms = this.milestones(p);
     return {
-      id: p.id, title: p.title, client: this.clientName(p.clientId), clientId: p.clientId, status: STATUS_LABELS[p.status] || p.status,
+      id: p.id, title: p.title, client: this.clientName(p.clientId), clientId: p.clientId, currency: p.currency, status: STATUS_LABELS[p.status] || p.status,
       description: p.description || null,
       links: { preview: p.previewUrl || null, live: p.liveUrl || null, github: p.githubUrl || null },
-      startDate: p.startDate, dueDate: p.dueDate, overdue: !!(p.dueDate && p.status !== 'done' && p.dueDate < todayIST()),
+      startDate: p.startDate, dueDate: p.dueDate, overdue: !!(p.dueDate && p.status !== 'done' && p.dueDate < this.today()),
       money: { ...this.projectStats(p), ...(ms.length ? { overdue: round(ms.reduce((a, m) => a + (m.state === 'overdue' ? m.left : 0), 0)) } : {}) },
       ...(ms.length ? { milestones: ms } : {}),
       ...this.workSummary(p)
@@ -202,7 +258,7 @@ class Ledger {
     return { minutes, hours, earnedPerHour: minutes > 0 ? round(received / (minutes / 60)) : null };
   }
   taskSummary(t) {
-    const p = this.project(t.projectId), today = todayIST();
+    const p = this.project(t.projectId), today = this.today();
     return { id: t.id, title: t.title, project: p ? this.projectLabel(p) : 'Deleted project', done: t.done, dueDate: t.dueDate, overdue: !t.done && !!t.dueDate && t.dueDate < today, doneAt: t.doneAt || undefined };
   }
   timeSummary(e) {
@@ -217,7 +273,7 @@ class Ledger {
   }
   // Open tasks that are overdue or due in the next 7 days, across every project.
   taskAlerts() {
-    const t = todayIST(), soon = addDays(t, 7), open = this.tasks.filter(x => !x.done && x.dueDate && this.project(x.projectId));
+    const t = this.today(), soon = addDays(t, 7), open = this.tasks.filter(x => !x.done && x.dueDate && this.project(x.projectId));
     const by = (a, b) => a.dueDate.localeCompare(b.dueDate);
     return { overdue: open.filter(x => x.dueDate < t).sort(by).map(x => this.taskSummary(x)), dueWithinAWeek: open.filter(x => x.dueDate >= t && x.dueDate <= soon).sort(by).map(x => this.taskSummary(x)) };
   }
@@ -229,10 +285,10 @@ class Ledger {
     const keep = { open: t => !t.done, done: t => t.done, overdue: t => !t.done && this.taskSummary(t).overdue, all: () => true }[f];
     if (!keep) return { error: 'status must be one of: open, overdue, done, all.' };
     const list = pool.filter(keep).sort((a, b) => this.taskOrder(a, b));
-    return { today: todayIST(), project: label, status: f, count: list.length, tasks: list.map(t => this.taskSummary(t)) };
+    return { today: this.today(), project: label, status: f, count: list.length, tasks: list.map(t => this.taskSummary(t)) };
   }
   listTime({ project, client, period = 'all_time', from, to } = {}) {
-    const r = periodRange(period, from, to);
+    const r = this.period(period, from, to);
     let pool = this.timeEntries.filter(e => inRange(e, r)), label;
     if (project) { const x = this.resolveProject(project, client); if (x.error) return x; pool = pool.filter(e => e.projectId === x.project.id); label = this.projectLabel(x.project); }
     else if (client) { const x = this.resolveClient(client); if (x.error) return x; const ids = new Set(this.projects.filter(p => p.clientId === x.client.id).map(p => p.id)); pool = pool.filter(e => ids.has(e.projectId)); }
@@ -256,14 +312,15 @@ class Ledger {
 
   txnSummary(t) {
     return {
-      id: t.id, date: t.date, type: t.type === 'out' ? 'money out' : 'money in', amount: t.amount,
+      id: t.id, date: t.date, type: t.type === 'out' ? 'money out' : 'money in', amount: t.amount, currency: t.currency,
       client: this.clientName(t.clientId), project: t.projectId ? ((this.project(t.projectId) || {}).title || 'Deleted project') : 'No project',
       category: t.category || null, note: t.note || null, invoice: t.invoiceId ? (this.invoices.find(i => i.id === t.invoiceId) || {}).number : undefined
     };
   }
 
-  summary({ period = 'all_time', from, to } = {}) {
-    const r = periodRange(period, from, to);
+  summary(a = {}) { return this.inCurrency(a, L => L.summaryBody(a)); }
+  summaryBody({ period = 'all_time', from, to } = {}) {
+    const r = this.period(period, from, to);
     const tx = this.txns.filter(t => inRange(t, r));
     const s = sumOf(tx);
     const byMonth = {};
@@ -280,7 +337,7 @@ class Ledger {
     const undated = this.txns.filter(t => !t.date).length;
     const ms = this.milestoneAlerts();
     return {
-      currency: 'INR', period: r.label, from: r.from, to: r.to, ...s,
+      currency: this.cur, period: r.label, from: r.from, to: r.to, ...s,
       marginPercent: s.revenue > 0 ? Math.round(s.profit / s.revenue * 100) : null,
       payments: tx.filter(t => t.type !== 'out').length, expenses: tx.filter(t => t.type === 'out').length,
       stillToCollect: round(owed.reduce((a, x) => a + x.stillToCollect, 0)),
@@ -297,22 +354,23 @@ class Ledger {
   owed() {
     return this.projects.map(p => ({ p, s: this.projectStats(p) })).filter(x => x.s.stillToCollect > 0)
       .sort((a, b) => b.s.stillToCollect - a.s.stillToCollect)
-      .map(({ p, s }) => ({ projectId: p.id, project: p.title, client: this.clientName(p.clientId), status: STATUS_LABELS[p.status], quoted: s.quoted, received: s.received, stillToCollect: s.stillToCollect }));
+      .map(({ p, s }) => ({ projectId: p.id, project: p.title, client: this.clientName(p.clientId), currency: p.currency, status: STATUS_LABELS[p.status], quoted: s.quoted, received: s.received, stillToCollect: s.stillToCollect }));
   }
 
-  comparePeriods({ preset, a_from, a_to, b_from, b_to } = {}) {
+  comparePeriods(args = {}) { return this.inCurrency(args, L => L.comparePeriodsBody(args)); }
+  comparePeriodsBody({ preset, a_from, a_to, b_from, b_to } = {}) {
     let a, b;
     if (preset === 'fy_vs_last_fy') { a = { period: 'this_fy' }; b = { period: 'last_fy' }; }
     else if (preset === 'year_vs_last_year') { a = { period: 'this_year' }; b = { period: 'last_year' }; }
     else if (preset === 'last_12_vs_previous_12') {
-      const t = todayIST(), y = Number(t.slice(0, 4)), m = Number(t.slice(5, 7));
+      const t = this.today(), y = Number(t.slice(0, 4)), m = Number(t.slice(5, 7));
       a = { period: 'last_12_months' }; b = { from: monthStart(y, m - 23), to: monthEnd(y, m - 12) };
     } else if (a_from || a_to || b_from || b_to) { a = { from: a_from, to: a_to }; b = { from: b_from, to: b_to }; }
     else { a = { period: 'this_month' }; b = { period: 'last_month' }; }
     const pick = x => { const s = this.summary(x); return { period: s.period, from: s.from, to: s.to, revenue: s.revenue, spending: s.spending, profit: s.profit, marginPercent: s.marginPercent, payments: s.payments, expenses: s.expenses, spendingByCategory: s.spendingByCategory }; };
     const A = pick(a), B = pick(b);
     const change = k => ({ difference: round(A[k] - B[k]), percent: B[k] ? Math.round((A[k] - B[k]) / Math.abs(B[k]) * 100) : null });
-    return { currency: 'INR', current: A, previous: B, change: { revenue: change('revenue'), spending: change('spending'), profit: change('profit') },
+    return { currency: this.cur, current: A, previous: B, change: { revenue: change('revenue'), spending: change('spending'), profit: change('profit') },
       note: this.txns.some(t => !t.date) ? 'Entries without a date are not in either period.' : undefined };
   }
 
@@ -320,21 +378,21 @@ class Ledger {
   // Paid when the payments linked to it reach its total. Cancelled invoices are never owed; drafts aren't sent yet.
   invoiceState(inv) {
     const paid = round(this.txns.filter(t => t.invoiceId === inv.id && t.type !== 'out').reduce((a, t) => a + t.amount, 0));
-    const due = round(Math.max(0, inv.total - paid)), t = todayIST();
+    const due = round(Math.max(0, inv.total - paid)), t = this.today();
     const overdue = !!inv.dueDate && inv.dueDate < t;
     const state = inv.status === 'cancelled' ? 'cancelled' : !due || inv.status === 'paid' ? 'paid' : inv.status === 'draft' ? 'draft' : overdue ? 'overdue' : paid ? 'part-paid' : 'unpaid';
     return { paid, due: ['paid', 'cancelled'].includes(state) ? 0 : due, state, daysOverdue: state === 'overdue' ? daysBetween(inv.dueDate, t) : undefined };
   }
   invoiceSummary(inv) {
     const s = this.invoiceState(inv), p = inv.projectId && this.project(inv.projectId), m = inv.milestoneId && this.milestoneRows.find(x => x.id === inv.milestoneId);
-    return { id: inv.id, number: inv.number, client: this.clientName(inv.clientId), project: p ? p.title : null, milestone: m ? m.name : undefined,
+    return { id: inv.id, number: inv.number, client: this.clientName(inv.clientId), currency: inv.currency, project: p ? p.title : null, milestone: m ? m.name : undefined,
       issueDate: inv.issueDate, dueDate: inv.dueDate, total: inv.total, paid: s.paid, due: s.due, state: s.state, daysOverdue: s.daysOverdue,
       reminders: inv.reminderCount ? { count: inv.reminderCount, last: inv.lastReminded } : undefined };
   }
-  // upi://pay link for the amount still due, which UPI apps open (and the QR code holds).
+  // upi://pay link for the amount still due, which UPI apps open (and the QR code holds). UPI only pays rupees.
   upiLink(inv) {
     const due = this.invoiceState(inv).due;
-    if (!this.settings.upiId || !due) return null;
+    if (!this.settings.upiId || !due || inv.currency !== 'INR') return null;
     const q = { pa: this.settings.upiId, pn: this.settings.businessName || this.settings.upiId, am: due.toFixed(2), cu: 'INR', tn: inv.number };
     return 'upi://pay?' + Object.entries(q).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
   }
@@ -344,7 +402,7 @@ class Ledger {
     if (!q) return { error: 'Say which invoice: its number, like INV/2026-27/001.' };
     let ms = this.invoices.filter(i => i.id === query || i.number.toLowerCase() === q);
     if (!ms.length) ms = this.invoices.filter(i => i.number.toLowerCase().endsWith('/' + q.replace(/^\//, '')));
-    if (ms.length > 1) { const thisYear = ms.filter(i => i.number.includes('/' + fyOf(todayIST()) + '/')); if (thisYear.length === 1) ms = thisYear; } // "002" means this year's
+    if (ms.length > 1) { const thisYear = ms.filter(i => i.number.includes('/' + fyOf(this.today(), this.settings.fyStartMonth) + '/')); if (thisYear.length === 1) ms = thisYear; } // "002" means this year's
     if (ms.length === 1) return { invoice: ms[0] };
     if (!ms.length) return { error: 'No invoice matches "' + query + '".', invoices: this.invoices.map(i => i.number) };
     return { error: 'Several invoices match "' + query + '". Give the full number.', matches: ms.map(i => i.number) };
@@ -355,7 +413,11 @@ class Ledger {
     const overdue = open.filter(x => x.s.state === 'overdue');
     return { unpaid: sum(open), unpaidCount: open.length, overdue: sum(overdue), overdueCount: overdue.length, drafts: this.invoices.filter(i => i.status === 'draft').length };
   }
-  listInvoices({ filter = 'open', client } = {}) {
+  listInvoices(a = {}) {
+    const c = a.client && this.resolveClient(a.client).client;
+    return this.inCurrency(a, L => L.listInvoicesBody(a), c ? this.invoices.filter(i => i.clientId === c.id) : []);
+  }
+  listInvoicesBody({ filter = 'open', client } = {}) {
     let list = this.invoices.map(i => this.invoiceSummary(i));
     const f = String(filter).toLowerCase();
     const keep = { open: x => x.due > 0 && x.state !== 'draft', unpaid: x => x.due > 0 && x.state !== 'draft', overdue: x => x.state === 'overdue', draft: x => x.state === 'draft',
@@ -364,27 +426,37 @@ class Ledger {
     list = list.filter(keep);
     if (client) { const names = new Set(this.find(this.clients, client, c => c.name).map(c => c.name)); list = list.filter(x => names.has(x.client)); }
     list.sort((a, b) => b.issueDate.localeCompare(a.issueDate) || b.number.localeCompare(a.number));
-    return { currency: 'INR', filter: f, count: list.length, totalDue: round(list.reduce((a, x) => a + x.due, 0)), invoices: list };
+    return { currency: this.cur, filter: f, count: list.length, totalDue: round(list.reduce((a, x) => a + x.due, 0)), invoices: list };
   }
   getInvoice({ invoice }) {
     const r = this.resolveInvoice(invoice); if (r.error) return r;
     const inv = r.invoice, c = this.client(inv.clientId) || {};
-    return { currency: 'INR', ...this.invoiceSummary(inv), clientContact: c.contact || null, items: inv.items.map(i => ({ ...i, amount: round(i.quantity * i.rate) })), notes: inv.notes || null,
+    return { ...this.invoiceSummary(inv), clientContact: c.contact || null, items: inv.items.map(i => ({ ...i, amount: round(i.quantity * i.rate) })), notes: inv.notes || null,
       sentAt: inv.sentAt, upiLink: this.upiLink(inv) || undefined,
       payments: this.txns.filter(t => t.invoiceId === inv.id).map(t => this.txnSummary(t)),
-      payTo: { name: this.settings.businessName || null, upiId: this.settings.upiId || null, bank: this.settings.bankDetails || null } };
+      payTo: this.payTo(inv.currency) };
   }
+  // Where to pay: the UPI ID only makes sense for rupee invoices.
+  payTo(currency) { return { name: this.settings.businessName || null, upiId: currency === 'INR' ? this.settings.upiId || null : null, bank: this.settings.bankDetails || null }; }
   // Overdue invoices grouped by client, most overdue money first.
-  listOverdue() {
+  listOverdue(a = {}) { return this.inCurrency(a, L => L.listOverdueBody()); }
+  listOverdueBody() {
     const by = {};
     this.invoices.forEach(i => { const s = this.invoiceState(i); if (s.state !== 'overdue') return;
       const c = by[i.clientId] = by[i.clientId] || { client: this.clientName(i.clientId), contact: (this.client(i.clientId) || {}).contact || null, due: 0, mostDaysOverdue: 0, invoices: [] };
       c.due = round(c.due + s.due); c.mostDaysOverdue = Math.max(c.mostDaysOverdue, s.daysOverdue); c.invoices.push(this.invoiceSummary(i)); });
     const clients = Object.values(by).sort((a, b) => b.due - a.due);
-    return { currency: 'INR', today: todayIST(), totalOverdue: round(clients.reduce((a, c) => a + c.due, 0)), clients };
+    return { currency: this.cur, today: this.today(), totalOverdue: round(clients.reduce((a, c) => a + c.due, 0)), clients };
   }
   // The facts for a payment reminder. The assistant writes the message; nothing is sent from here.
-  reminderFacts({ invoice, client }) {
+  reminderFacts(a = {}) {
+    if (this.cur) return this.reminderFactsBody(a);
+    let hint = [];
+    if (a.invoice) { const r = this.resolveInvoice(a.invoice); if (!r.error) hint = [r.invoice]; }
+    else if (a.client) { const r = this.resolveClient(a.client); if (!r.error) hint = this.invoices.filter(i => i.clientId === r.client.id && this.invoiceState(i).due > 0); }
+    return this.inCurrency(a, L => L.reminderFactsBody(a), hint);
+  }
+  reminderFactsBody({ invoice, client }) {
     let invs;
     if (invoice) { const r = this.resolveInvoice(invoice); if (r.error) return r; invs = [r.invoice]; }
     else if (client) { const r = this.resolveClient(client); if (r.error) return r; invs = this.invoices.filter(i => i.clientId === r.client.id); }
@@ -392,30 +464,31 @@ class Ledger {
     const owed = invs.map(i => ({ i, s: this.invoiceState(i) })).filter(x => x.s.due > 0 && x.s.state !== 'draft');
     if (!owed.length) return { error: 'Nothing is owed on ' + (invoice ? 'that invoice' : 'their invoices') + ' (drafts don\'t count until they are sent).' };
     const c = this.client(owed[0].i.clientId) || {}, most = Math.max(0, ...owed.map(x => x.s.daysOverdue || 0));
-    return { currency: 'INR', client: c.name, contact: c.contact || null, whatsappNumber: whatsappNumber(c.contact) || undefined,
+    return { currency: this.cur, client: c.name, contact: c.contact || null, whatsappNumber: whatsappNumber(c.contact) || undefined,
       tone: reminderTone(most), toneMeaning: { friendly: 'polite nudge', firm: 'over a week late: clear and direct', final: 'over a month late: ask for a payment date' }[reminderTone(most)],
       totalDue: round(owed.reduce((a, x) => a + x.s.due, 0)),
       invoices: owed.map(({ i, s }) => ({ number: i.number, due: s.due, dueDate: i.dueDate, daysOverdue: s.daysOverdue || 0, upiLink: this.upiLink(i) || undefined, timesReminded: i.reminderCount, lastReminded: i.lastReminded })),
-      payTo: { name: this.settings.businessName || null, upiId: this.settings.upiId || null, bank: this.settings.bankDetails || null },
+      payTo: this.payTo(this.cur),
       note: 'Write the message for the user to send themselves; this server never sends messages. Afterwards, offer to call log_reminder.' };
   }
 
   // Things worth acting on: overdue work, money owed, leads, and gaps in the data.
+  // Not scoped to a currency: every money item says its own currency.
   attention() {
-    const t = todayIST();
+    const t = this.today();
     const open = this.projects.filter(p => p.status !== 'done');
-    const soon = new Date(Date.now() + 5.5 * 3600e3 + 7 * 864e5).toISOString().slice(0, 10);
+    const soon = addDays(t, 7);
     const ms = this.milestoneAlerts();
     const lastPaid = p => this.txns.filter(x => x.projectId === p.id && x.type !== 'out' && x.date).map(x => x.date).sort().pop() || null;
     return {
-      currency: 'INR', today: t,
+      ...this.currencyTag(), today: t,
       overdueProjects: open.filter(p => p.dueDate && p.dueDate < t).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate, status: STATUS_LABELS[p.status] })),
       dueWithinAWeek: open.filter(p => p.dueDate && p.dueDate >= t && p.dueDate <= soon).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate })),
       overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
       overdueTasks: this.taskAlerts().overdue, tasksDueWithinAWeek: this.taskAlerts().dueWithinAWeek,
       stillToCollect: this.owed().map(o => ({ ...o, lastPayment: lastPaid(this.project(o.projectId)) })),
       overdueInvoices: this.invoices.map(i => this.invoiceSummary(i)).filter(x => x.state === 'overdue').sort((a, b) => b.daysOverdue - a.daysOverdue),
-      openLeads: this.projects.filter(p => p.status === 'lead').map(p => ({ id: p.id, project: this.projectLabel(p), quoted: p.quoted, added: (p.createdAt || '').slice(0, 10) })),
+      openLeads: this.projects.filter(p => p.status === 'lead').map(p => ({ id: p.id, project: this.projectLabel(p), quoted: p.quoted, currency: p.currency, added: (p.createdAt || '').slice(0, 10) })),
       onHold: this.projects.filter(p => p.status === 'paused').map(p => ({ id: p.id, project: this.projectLabel(p) })),
       renewalsDue: this.renewalsDue(30),
       missingInfo: {
@@ -431,7 +504,7 @@ class Ledger {
     if (!q) return { error: 'Give some text to search for.' };
     const has = s => String(s || '').toLowerCase().includes(q);
     return {
-      currency: 'INR', query,
+      ...this.currencyTag(), query,
       clients: this.clients.filter(c => has(c.name) || has(c.contact) || has(c.notes)).map(c => ({ id: c.id, name: c.name, contact: c.contact || null })),
       projects: this.projects.filter(p => has(p.title) || has(p.description) || has(p.previewUrl) || has(p.liveUrl) || has(p.githubUrl) || has(this.clientName(p.clientId)))
         .map(p => ({ id: p.id, title: p.title, client: this.clientName(p.clientId), status: STATUS_LABELS[p.status] })),
@@ -444,7 +517,7 @@ class Ledger {
     if (status) { const s = String(status).toLowerCase(); ps = ps.filter(p => p.status === s || (STATUS_LABELS[p.status] || '').toLowerCase() === s || (s === 'open' && p.status !== 'done')); }
     if (client) { const ids = new Set(this.find(this.clients, client, c => c.name).map(c => c.id)); ps = ps.filter(p => ids.has(p.clientId)); }
     if (search) { const q = String(search).toLowerCase(); ps = ps.filter(p => (p.title + ' ' + this.clientName(p.clientId) + ' ' + p.description).toLowerCase().includes(q)); }
-    return { currency: 'INR', count: ps.length, projects: ps.map(p => this.projectSummary(p)) };
+    return { ...this.currencyTag(), count: ps.length, projects: ps.map(p => this.projectSummary(p)) };
   }
 
   getProject({ project, client }) {
@@ -453,13 +526,14 @@ class Ledger {
     const p = r.project;
     const tx = this.txns.filter(t => t.projectId === p.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     const ts = this.projectTasks(p), te = this.timeEntries.filter(e => e.projectId === p.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    return { currency: 'INR', ...this.projectSummary(p), transactions: tx.map(t => this.txnSummary(t)),
+    return { ...this.projectSummary(p), transactions: tx.map(t => this.txnSummary(t)),
       ...(ts.length ? { taskList: ts.map(t => this.taskSummary(t)) } : {}), ...(te.length ? { timeEntries: te.map(e => this.timeSummary(e)) } : {}) };
   }
 
-  listClients() {
+  listClients(a = {}) { return this.inCurrency(a, L => L.listClientsBody()); }
+  listClientsBody() {
     return {
-      currency: 'INR',
+      currency: this.cur,
       clients: this.clients.slice().sort((a, b) => a.order - b.order).map(c => {
         const ps = this.projects.filter(p => p.clientId === c.id);
         return { id: c.id, name: c.name, contact: c.contact || null, projects: ps.length, openProjects: ps.filter(p => p.status !== 'done').length,
@@ -468,20 +542,26 @@ class Ledger {
     };
   }
 
-  getClient({ client }) {
+  getClient(a = {}) {
+    const r = this.resolveClient(a.client);
+    if (r.error) return r;
+    const mine = x => x.clientId === r.client.id;
+    return this.inCurrency(a, L => L.getClientBody(a), [...this.projects.filter(mine), ...this.txns.filter(mine), ...this.invoices.filter(mine), ...this.services.filter(mine)]);
+  }
+  getClientBody({ client }) {
     const r = this.resolveClient(client);
     if (r.error) return r;
     const c = r.client, tx = this.txns.filter(t => t.clientId === c.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     const svc = this.services.filter(x => x.clientId === c.id);
-    return { currency: 'INR', id: c.id, name: c.name, contact: c.contact || null, notes: c.notes || null, ...sumOf(tx),
+    return { currency: this.cur, id: c.id, name: c.name, contact: c.contact || null, notes: c.notes || null, ...sumOf(tx),
       projects: this.projects.filter(p => p.clientId === c.id).map(p => this.projectSummary(p)), transactions: tx.map(t => this.txnSummary(t)),
       services: svc.length ? svc.map(x => this.serviceSummary(x)) : undefined };
   }
 
   // ---------- renewals ----------
   serviceSummary(x) {
-    const t = todayIST(), days = daysBetween(t, x.nextRenewal), p = x.projectId && this.project(x.projectId);
-    return { id: x.id, name: x.name, kind: x.kind, client: this.clientName(x.clientId), project: p ? p.title : null, provider: x.provider || null,
+    const t = this.today(), days = daysBetween(t, x.nextRenewal), p = x.projectId && this.project(x.projectId);
+    return { id: x.id, name: x.name, kind: x.kind, client: this.clientName(x.clientId), currency: x.currency, project: p ? p.title : null, provider: x.provider || null,
       cost: x.cost, price: x.price, cycle: x.cycle, nextRenewal: x.nextRenewal, daysUntilRenewal: days, overdue: x.active && days < 0,
       autoRenew: x.autoRenew, active: x.active, yearlyProfit: round((x.price - x.cost) * 12 / CYCLE_MONTHS[x.cycle]), notes: x.notes || undefined };
   }
@@ -492,14 +572,15 @@ class Ledger {
     return { revenue, cost, profit: round(revenue - cost) };
   }
   renewalsDue(days = 30) {
-    const until = addDays(todayIST(), days);
+    const until = addDays(this.today(), days);
     return this.services.filter(x => x.active && x.nextRenewal <= until).sort((a, b) => a.nextRenewal.localeCompare(b.nextRenewal)).map(x => this.serviceSummary(x));
   }
-  listRenewals({ within_days = 30, include_inactive = false } = {}) {
+  listRenewals(a = {}) { return this.inCurrency(a, L => L.listRenewalsBody(a)); }
+  listRenewalsBody({ within_days = 30, include_inactive = false } = {}) {
     const n = Math.max(0, Math.min(366, Number(within_days) || 30));
     const all = this.services.filter(x => include_inactive || x.active).sort((a, b) => a.nextRenewal.localeCompare(b.nextRenewal)).map(x => this.serviceSummary(x));
     const due = this.renewalsDue(n);
-    return { currency: 'INR', today: todayIST(), yearly: this.serviceYearly(), overdue: due.filter(x => x.overdue), dueWithinDays: n, due: due.filter(x => !x.overdue), services: all };
+    return { currency: this.cur, today: this.today(), yearly: this.serviceYearly(), overdue: due.filter(x => x.overdue), dueWithinDays: n, due: due.filter(x => !x.overdue), services: all };
   }
   resolveService(query, clientQuery) {
     let pool = this.services;
@@ -510,8 +591,15 @@ class Ledger {
     return { error: 'Several services match "' + query + '". Give the client or the id.', matches: ms.map(x => ({ id: x.id, name: x.name, client: this.clientName(x.clientId) })) };
   }
 
-  listTransactions({ type, period = 'all_time', from, to, client, project, category, limit = 100 } = {}) {
-    const r = periodRange(period, from, to);
+  listTransactions(a = {}) {
+    // A project or client filter decides the currency when none is asked for, so its entries aren't hidden by the default.
+    const ids = a.project ? new Set(this.find(this.projects, a.project, p => p.title).map(p => p.id)) : null;
+    const cids = a.client ? new Set(this.find(this.clients, a.client, c => c.name).map(c => c.id)) : null;
+    const hint = ids || cids ? this.txns.filter(t => (!ids || ids.has(t.projectId)) && (!cids || cids.has(t.clientId))) : [];
+    return this.inCurrency(a, L => L.listTransactionsBody(a), hint);
+  }
+  listTransactionsBody({ type, period = 'all_time', from, to, client, project, category, limit = 100 } = {}) {
+    const r = this.period(period, from, to);
     let tx = this.txns.filter(t => inRange(t, r));
     if (type === 'in' || type === 'out') tx = tx.filter(t => t.type === type);
     if (client) { const ids = new Set(this.find(this.clients, client, c => c.name).map(c => c.id)); tx = tx.filter(t => ids.has(t.clientId)); }
@@ -519,10 +607,10 @@ class Ledger {
     if (category) tx = tx.filter(t => t.category.toLowerCase() === String(category).toLowerCase());
     tx.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     const n = Math.max(1, Math.min(500, Number(limit) || 100));
-    return { currency: 'INR', period: r.label, count: tx.length, ...sumOf(tx), transactions: tx.slice(0, n).map(t => this.txnSummary(t)),
+    return { currency: this.cur, period: r.label, count: tx.length, ...sumOf(tx), transactions: tx.slice(0, n).map(t => this.txnSummary(t)),
       truncated: tx.length > n ? 'Showing the newest ' + n + ' of ' + tx.length + '.' : undefined };
   }
 }
 
-module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, todayIST, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber,
+module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, CURRENCIES, LOCALES, DEFAULTS, todayIn, validTimezone, formatMoney, fyStartYear, fyLabel, fyRange, fyOf, periodRange, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber,
   addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY };

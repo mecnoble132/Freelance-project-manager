@@ -1,6 +1,6 @@
 # MCP server
 
-`api/mcp.js` is an [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can answer questions about the ledger and change it: "how much profit did I make this year?", "add a booking site project for Sweet Crumbs, quoted ₹40,000", "Edustudy paid ₹5,000 today", "mark the GeekBoz website as done". Changes show up on the website the next time it loads.
+`api/mcp.js` is an [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can answer questions about the ledger and change it: "how much profit did I make this year?", "add a booking site project for Sweet Crumbs, quoted ₹40,000" (or $500, €300, £250…), "Edustudy paid ₹5,000 today", "mark the GeekBoz website as done". Changes show up on the website the next time it loads.
 
 ## Code layout
 
@@ -48,9 +48,18 @@ Every table in the [README](../README.md#data) is reachable through these tools.
 | `add_task` / `update_task` / `delete_task` | Add several tasks at once; tick one off, reopen or edit it; delete (two-step) |
 | `log_time` | Log minutes or hours on a project |
 | `log_reminder` | Record that you reminded a client, so the next reminder is firmer |
-| `update_settings` | Change your business details, UPI ID, invoice prefix and payment terms |
+| `update_settings` | Change your business details, UPI ID, invoice prefix, payment terms, and your regional settings (default currency, financial year start month, time zone, locale) |
 | `update_transaction` / `delete_transactions` | Fix or remove money entries |
 | `undo_change` | Revert the latest change, or any earlier one by its `change_id` |
+
+## Currencies, financial year and time zone
+
+- **Currencies.** A fixed list: INR, USD, EUR, GBP, AUD, CAD, SGD, AED, NZD, CHF, JPY, ZAR. Each project has one currency (`currency` on `create_project`; it defaults to the user's default currency), and its payments, expenses, invoices and renewals are always in that currency. Money without a project takes the `currency` given, else the default. There is no conversion.
+- **Never added together.** The tools that total money (`get_summary`, `compare_periods`, `list_clients`, `get_client`, `list_transactions`, `list_invoices`, `list_overdue`, `draft_payment_reminder`, `list_renewals`) report one currency at a time: the `currency` input, else the currency of the project/client/invoice being asked about, else the only one in use, else the default. They return `currency`, and `otherCurrencies` (each one's revenue, spending, profit and still to collect) when there is money in others. `get_attention_items`, `list_projects`, `search`, `get_project` and `get_invoice` span all currencies and give every money item its own `currency`.
+- **Invariants.** A payment, expense, invoice or renewal in another currency than its project (or a payment than its invoice) is refused, as is moving it to such a project. A project's currency can be changed only while it has no payments, expenses, invoices, renewals or milestones. An invoice's currency never changes.
+- **Financial year.** Starts on the first of `fy_start_month` (4 = April, the default; 1 = the calendar year, labelled `FY 2026`). `this_fy` and `last_fy` follow it. Invoice numbers use `PREFIX/2026-27/001` (`PREFIX/2026/001` for a January start); changing the month later restarts the count at 001 under the new label.
+- **Time zone.** "Today" (default dates, overdue checks, renewals, invoice dates) is the date in the user's `timezone` setting, default `Asia/Kolkata`.
+- **UPI** links and the UPI ID on invoices are only for rupee invoices.
 
 ## Prompts
 
@@ -61,7 +70,7 @@ Every table in the [README](../README.md#data) is reachable through these tools.
 - Deletes are two-step: the first call only shows what would be deleted, and nothing happens until it's called again with `confirm: true`.
 - A new client is only created when asked for explicitly, so a misspelt name never creates a duplicate.
 - Bulk adds are checked first. If any entry doesn't match a client or project, nothing is saved.
-- Links must be http(s), dates must be real, and amounts must be positive.
+- Links must be http(s), dates must be real, amounts must be positive, and money must be in the same currency as its project.
 - Every change is recorded in `activity_log` and can be undone as a whole. Writes refuse to run if that table is missing.
 
 ## Sign-in (OAuth 2.1)

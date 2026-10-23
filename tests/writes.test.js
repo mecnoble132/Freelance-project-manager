@@ -274,7 +274,8 @@ test('business details: edit them, and refuse bad values', async t => {
 
 test('business details are added the first time they are saved', async t => {
   const fresh = setup(t, { empty: true });
-  assert.deepEqual(await call(fresh.db, 'get_settings'), { settings: { businessName: '', address: '', phone: '', email: '', upiId: '', bankDetails: '', invoicePrefix: 'INV', paymentTermsDays: 7, invoiceNotes: '' }, saved: false });
+  assert.deepEqual(await call(fresh.db, 'get_settings'), { settings: { businessName: '', address: '', phone: '', email: '', upiId: '', bankDetails: '', invoicePrefix: 'INV', paymentTermsDays: 7, invoiceNotes: '',
+    defaultCurrency: 'INR', fyStartMonth: 4, timezone: 'Asia/Kolkata', locale: 'en-IN' }, saved: false }); // a new user gets the old behaviour
   await changeAndUndo(t, fresh, 'update_settings', { business_name: 'Mec' }, () => {
     assert.deepEqual(rows(fresh.store, 'settings').map(x => [x.business_name, x.invoice_prefix, x.payment_terms_days]), [['Mec', 'INV', 7]]);
   });
