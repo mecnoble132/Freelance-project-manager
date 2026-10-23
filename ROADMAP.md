@@ -6,13 +6,14 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 |---|---|---|
 | A | Tests, backups, financial year view | Not started |
 | B | Payment milestones | Not started |
-| C | Invoices (UPI QR, TDS) | Not started |
-| D | Chasing payments | Not started |
-| E | Renewals and retainers | Not started |
-| F | Leads and quotes | Not started |
-| G | Tasks and time | Not started |
+| C | Invoices (UPI QR, TDS) and chasing payments | Not started |
+| D | Renewals and retainers | Not started |
+| E | Leads and quotes | Not started |
+| F | Tasks and time | Not started |
 
 One pull request per phase, in this order: each builds on the one before.
+
+The plan is tuned for **few bugs and fast delivery**: the existing data isn't precious, so there are no backups or test copies. Bugs are caught by automated tests instead, and every phase must add tests for what it builds.
 
 ---
 
@@ -29,7 +30,7 @@ See `README.md` for features and setup. In short:
   - `api/_lib/writes.js`: every change, input cleaning, the `Change` class (logs to `activity_log`), and undo.
   - `api/_lib/supabase.js`: the only database access. `forUser(uid)` adds `user_id = uid` to every operation.
   - `api/oauth/*`, `api/_lib/oauth.js`: sign-in for MCP clients. Don't touch unless needed.
-- No tests or backups yet; Phase A adds them.
+- No tests yet; Phase A adds them.
 
 Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the only user.
 
@@ -39,12 +40,11 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
 
 ### Releasing a phase
 
-1. Run `node scripts/backup.js` (from Phase A) and keep the file.
-2. Build the phase. Run `node --test tests/`; everything must pass.
-3. Run `supabase/schema.sql` in the Supabase SQL editor **before** merging. Changes only add things, so the live code keeps working.
-4. Merge. On the live site, check the phase's checklist using a client called "Test" (delete it afterwards), and that the dashboard numbers look the same as before.
-5. If something breaks: Vercel → Deployments → Instant Rollback, then fix on a new branch. Leave the database as it is.
-6. Update `README.md` and the table above.
+1. Build the phase **with its tests**. Run `node --test tests/`; everything must pass, old tests included.
+2. Run `supabase/schema.sql` in the Supabase SQL editor **before** merging (changes only add things, so the live code keeps working). Run it twice: the second run must succeed too.
+3. Merge, then go through the phase's **Check** list on the live site and in Claude, plus section 4. Every calculation in a **Check** list (dates, totals, statuses, undo) must also be an automated test; only the look and feel is checked by hand.
+4. If something breaks: Vercel → Deployments → Instant Rollback, then fix on a new branch.
+5. Update `README.md` and the table above.
 
 ### Database
 
@@ -95,7 +95,15 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
   - `writes.test.js`: each write tool, including that undo restores everything exactly.
   - `tools.test.js`: every tool has a unique name, a schema and a `run` function.
   - `guard.test.js`: no file but `supabase.js` contains `SUPABASE_SERVICE_ROLE_KEY` or `/rest/v1`.
-- `scripts/backup.js`: dumps every table to `backup-YYYY-MM-DD.json` using the env vars. Add `backup-*.json` to `.gitignore`, and `tests/`, `scripts/` to a `.vercelignore`.
+  - `consistency.test.js`, the main guard against the bugs this codebase invites:
+    - every table the code writes to appears in `schema.sql` and in the `activity_log` list
+    - the project statuses match in all five places, and the categories in both
+    - `index.html`'s `TABLES` and `ledger.js`'s `load()` load the same tables
+    - every table with a project or client column is handled in `deleteProject` / `deleteClient` and in `undoChange`
+
+    Read the files as text; simple regexes are fine.
+  - `mcp.test.js`: call `api/mcp.js` with fake requests (`initialize`, `tools/list`, a `tools/call`, a request without a token gets 401).
+- Add `tests/` and `scripts/` to a `.vercelignore` so they aren't served.
 - `scripts/call-tool.js <user-id> <tool> '<json>'`: runs one tool directly, for checking without Claude.
 - **Financial year (April–March)**:
   - Website: add "This financial year" and "Last financial year" to `PERIODS`, handled in `periodBuckets()` and `inPeriod()`, labelled "FY 2026–27", and make it the default. The Money page shares `PERIODS`.
@@ -131,7 +139,7 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
   - Invoices are cancelled, never deleted.
 - **Check**: numbering across 1 April; totals with and without GST; a payment with TDS settles an invoice, and removing it reopens the invoice; scan the QR with a UPI app (don't pay); the PDF fits on one A4 page.
 
-### D. Chasing payments
+**Chasing payments** (same phase, after invoices work):
 
 - **DB**: on `invoices`, add `last_reminded` and `reminder_count`.
 - **Website**: "To collect" on the Invoices tab and the dashboard, grouped by client with days overdue. On each invoice, "Copy reminder" and "Send on WhatsApp" (`https://wa.me/<number>?text=…`, assuming +91 for 10-digit numbers), then "Mark as reminded". Tone gets firmer after 7 and 30 days.
@@ -143,7 +151,7 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
   - The server never sends messages itself.
 - **Check**: the WhatsApp link text (open it, don't send); mark as reminded; the prompts appear in Claude.
 
-### E. Renewals and retainers
+### D. Renewals and retainers
 
 - **DB**: `services` table:
   - `client_id`, `project_id`
@@ -158,7 +166,7 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
   - Renewals are added to `get_client` and `get_attention_items`.
 - **Check**: date maths (monthly from 31 Jan, yearly from 29 Feb); renew, then undo removes all three.
 
-### F. Leads and quotes
+### E. Leads and quotes
 
 - **DB**:
   - On `projects`, add `source`, `next_follow_up`, `lost_reason`, and a `lost` status (update all five places that list statuses).
@@ -170,7 +178,7 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
   - New prompt: `leads_to_follow_up`.
 - **Check**: lost projects owe nothing and show up in the filters; accept a quote, then undo it.
 
-### G. Tasks and time
+### F. Tasks and time
 
 - **DB**:
   - `tasks`: `project_id` (cascade), `title`, `done`, `due_date`, `sort_order`, `done_at`.
