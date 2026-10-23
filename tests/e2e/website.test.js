@@ -359,10 +359,10 @@ test('invoices tab: what each client owes, and filters', async t => {
   assert.match(await card(page, 'To collect on invoices').textContent(), /₹15,000.*GeekBoz.*1 invoice · 8 days overdue.*₹15,000/);
   const listed = () => page.locator('#view > .list .row .title').allTextContents();
   assert.deepEqual(await listed(), ['INV/2026-27/002 · GeekBoz']);
-  assert.deepEqual(await page.locator('.pills button').allTextContents(), ['Unpaid 1', 'Overdue 1', 'Drafts 1', 'Paid 2', 'Cancelled 1', 'All 5']);
-  await page.locator('.pills button', { hasText: /^Paid / }).click();
+  assert.deepEqual(await page.locator('.pills[aria-label="Invoices"] button').allTextContents(), ['Unpaid 1', 'Overdue 1', 'Drafts 1', 'Paid 2', 'Cancelled 1', 'All 5']);
+  await page.locator('.pills[aria-label="Invoices"] button', { hasText: /^Paid / }).click();
   assert.deepEqual(await listed(), ['INV/2026-27/001 · GeekBoz', 'INV/2025-26/001 · Edustudy']);
-  await page.click('.pills button:has-text("Cancelled")');
+  await page.click('.pills[aria-label="Invoices"] button:has-text("Cancelled")');
   assert.match(await page.locator('#view > .list').textContent(), /INV\/2025-26\/002.*₹5,000.*Cancelled/);
   await page.goto(SITE + '#/');
   assert.match(await card(page, 'To collect on invoices').textContent(), /GeekBoz.*8 days overdue/);
@@ -560,6 +560,65 @@ test('the site still works before the milestones table exists', async t => {
   await page.waitForSelector('text=Run supabase/schema.sql');
 });
 
+// ---------- boards ----------
+const column = (page, label) => page.locator('.board .bcol[aria-label="' + label + '"]');
+const cardTitles = (page, label) => column(page, label).locator('.bcard .title').allTextContents();
+
+test('projects board: drag a project to another status, or use Move to; the view is remembered', async t => {
+  const page = await open(t, { hash: '#/projects' });
+  await page.click('.view-pills button:has-text("Board")');
+  await page.locator('.board').waitFor();
+  assert.equal(await page.locator('.pills[aria-label="Status"]').count(), 0, 'the board shows every status, so no status filter');
+  assert.deepEqual(await page.locator('.board .bcol .bhead').allTextContents(), ['Lead1', 'In progress1', 'On hold0', 'Done1']);
+  assert.deepEqual(await cardTitles(page, 'Lead'), ['App']);
+  assert.match(await column(page, 'In progress').textContent(), /Website.*GeekBoz · ₹20,000 of ₹50,000 paid.*₹15,000 overdue/);
+  await page.dragAndDrop('.bcard:has-text("App")', '.board .bcol[aria-label="In progress"]');
+  await page.waitForFunction(id => window.__store.rows.projects.find(p => p.id === id).status === 'active', ids.eduApp);
+  assert.deepEqual((await cardTitles(page, 'In progress')).sort(), ['App', 'Website']);
+  await page.selectOption('select[aria-label="Move App to"]', 'paused');
+  await page.waitForFunction(id => window.__store.rows.projects.find(p => p.id === id).status === 'paused', ids.eduApp);
+  assert.deepEqual(await cardTitles(page, 'On hold'), ['App']);
+  assert.deepEqual(await page.locator('select[aria-label="Move App to"] option').allTextContents(), ['Move to…', 'Lead', 'In progress', 'Done']);
+  await page.fill('input[aria-label="Search projects"]', 'geekboz');
+  assert.deepEqual(await page.locator('.board .bcard .title').allTextContents(), ['Website']);
+  await page.reload();
+  await page.locator('.board').waitFor(); // still the board after reloading
+  await page.click('.view-pills button:has-text("List")');
+  await page.locator('.pgrid').waitFor();
+});
+
+test('invoices board: Draft, Sent, Paid, Cancelled; moving to Paid records a payment', async t => {
+  const page = await open(t, { hash: '#/invoices' });
+  await page.click('.view-pills button:has-text("Board")');
+  await page.locator('.board').waitFor();
+  assert.deepEqual(await page.locator('.board .bcol .bhead').allTextContents(), ['Draft₹2,500', 'Sent₹15,000', 'Paid₹35,000', 'Cancelled₹0']);
+  assert.deepEqual(await cardTitles(page, 'Sent'), ['INV/2026-27/002']);
+  assert.match(await column(page, 'Sent').textContent(), /8 days overdue/);
+  assert.deepEqual(await cardTitles(page, 'Paid'), ['INV/2026-27/001', 'INV/2025-26/001']);
+  // Payments cover a paid invoice, so it can't be moved back.
+  assert.equal(await column(page, 'Paid').locator('select').count(), 0);
+  await page.dragAndDrop('.bcard:has-text("INV/2026-27/001")', '.board .bcol[aria-label="Draft"]');
+  assert.equal((await invRow(page, 'INV/2026-27/001')).status, 'sent');
+  // Draft → Sent by dragging.
+  await page.dragAndDrop('.bcard:has-text("INV/2026-27/003")', '.board .bcol[aria-label="Sent"]');
+  await page.waitForFunction(id => window.__store.rows.invoices.find(i => i.id === id).status === 'sent', ids.invDraft);
+  assert.ok((await invRow(page, 'INV/2026-27/003')).sent_at);
+  assert.deepEqual(await cardTitles(page, 'Sent'), ['INV/2026-27/002', 'INV/2026-27/003']); // most overdue first
+  // Sent → Paid opens Record payment for the amount due.
+  await page.selectOption('select[aria-label="Move INV/2026-27/003 to"]', 'paid');
+  assert.match(await page.locator('.sheet .notice').textContent(), /Payment for invoice INV\/2026-27\/003/);
+  assert.equal(await page.inputValue('#m-amount'), '2500');
+  await page.click('.sheet button:has-text("Save")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.deepEqual(await cardTitles(page, 'Paid'), ['INV/2026-27/003', 'INV/2026-27/001', 'INV/2025-26/001']);
+  // Sent → Cancelled, and back to Sent.
+  await page.selectOption('select[aria-label="Move INV/2026-27/002 to"]', 'cancelled');
+  await page.waitForFunction(id => window.__store.rows.invoices.find(i => i.id === id).status === 'cancelled', ids.invDesign);
+  assert.deepEqual(await page.locator('select[aria-label="Move INV/2026-27/002 to"] option').allTextContents(), ['Move to…', 'Draft', 'Sent']);
+  await page.dragAndDrop('.bcard:has-text("INV/2026-27/002")', '.board .bcol[aria-label="Sent"]');
+  await page.waitForFunction(id => window.__store.rows.invoices.find(i => i.id === id).status === 'sent', ids.invDesign);
+});
+
 test('projects: filters and search', async t => {
   const page = await open(t, { hash: '#/projects' });
   await page.waitForSelector('.pcard');
@@ -622,6 +681,15 @@ for (const colorScheme of ['light', 'dark']) {
       await page.locator('#view h1').first().waitFor();
       const [scroll, width] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
       assert.ok(scroll <= width, hash + ' scrolls sideways on a phone (' + scroll + 'px > ' + width + 'px)');
+    }
+    for (const hash of ['#/projects', '#/invoices']) {
+      await page.goto(SITE + hash);
+      await page.click('.view-pills button:has-text("Board")');
+      await page.locator('.board').waitFor();
+      const [scroll, width] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+      assert.ok(scroll <= width, hash + ' board scrolls the page sideways on a phone');
+      const first = await page.locator('.board .bcol').first().boundingBox();
+      assert.ok(first.x >= 0 && first.x + first.width <= 375, hash + ' board column is wider than the phone');
     }
     await page.goto(SITE + '#/invoices');
     await heading(page).filter({ hasText: 'Invoices' }).waitFor();
