@@ -40,13 +40,13 @@ function sumOf(txns) {
 }
 
 async function load(db) {
-  const [clients, projects, txns] = await Promise.all(['clients', 'projects', 'txns'].map(t => db.select(t)));
-  return new Ledger(clients, projects, txns);
+  const [clients, projects, txns, milestones] = await Promise.all(['clients', 'projects', 'txns', 'milestones'].map(t => db.select(t)));
+  return new Ledger(clients, projects, txns, milestones);
 }
 
 class Ledger {
-  constructor(clients, projects, txns) {
-    this.raw = { clients, projects, txns };
+  constructor(clients, projects, txns, milestones = []) {
+    this.raw = { clients, projects, txns, milestones };
     this.clients = clients.map(r => ({ id: r.id, name: r.name, contact: r.contact || '', notes: r.notes || '', order: r.sort_order ?? 0 }));
     this.projects = projects.map(r => ({
       id: r.id, clientId: r.client_id, title: r.name, status: r.status || 'active', description: r.description || '',
@@ -57,6 +57,7 @@ class Ledger {
       id: r.id, clientId: r.client_id, projectId: r.project_id, type: r.type, amount: Number(r.amount) || 0,
       category: r.type === 'out' ? (r.category || guessCategory(r.note)) : '', note: r.note || '', date: r.date || null
     }));
+    this.milestoneRows = milestones.map(r => ({ id: r.id, projectId: r.project_id, name: r.name || '', amount: Number(r.amount) || 0, dueDate: r.due_date || null, order: r.sort_order ?? 0, createdAt: r.created_at || '' }));
   }
   client(id) { return this.clients.find(c => c.id === id); }
   clientName(id) { return (this.client(id) || {}).name || 'Unknown client'; }
@@ -103,13 +104,43 @@ class Ledger {
     };
   }
 
+  // A project's money in pays off its milestones in order. One is overdue when its due date has passed and it isn't
+  // fully paid; leads aren't owed anything yet, so their milestones are never overdue.
+  milestones(p) {
+    const t = todayIST();
+    let left = sumOf(this.txns.filter(x => x.projectId === p.id)).revenue;
+    return this.milestoneRows.filter(m => m.projectId === p.id).sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt)).map(m => {
+      const paid = round(Math.min(m.amount, left)); left = round(left - paid);
+      const owing = round(m.amount - paid);
+      const overdue = owing > 0 && p.status !== 'lead' && !!m.dueDate && m.dueDate < t;
+      return { id: m.id, name: m.name, amount: m.amount, dueDate: m.dueDate, paid, left: owing,
+        state: !owing ? 'paid' : overdue ? 'overdue' : paid ? 'part-paid' : 'unpaid',
+        daysOverdue: overdue ? Math.round((Date.parse(t) - Date.parse(m.dueDate)) / 864e5) : undefined };
+    });
+  }
+
+  // Overdue milestones, and unpaid ones due in the next 7 days, across every project.
+  milestoneAlerts() {
+    const t = todayIST(), soon = new Date(Date.now() + 5.5 * 3600e3 + 7 * 864e5).toISOString().slice(0, 10);
+    const overdue = [], dueWithinAWeek = [];
+    this.projects.forEach(p => this.milestones(p).forEach(m => {
+      const item = { projectId: p.id, project: this.projectLabel(p), milestone: m.name, amount: m.amount, left: m.left, dueDate: m.dueDate };
+      if (m.state === 'overdue') overdue.push({ ...item, daysOverdue: m.daysOverdue });
+      else if (m.left && p.status !== 'lead' && m.dueDate && m.dueDate >= t && m.dueDate <= soon) dueWithinAWeek.push(item);
+    }));
+    overdue.sort((a, b) => a.dueDate.localeCompare(b.dueDate)); dueWithinAWeek.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    return { overdue, dueWithinAWeek, overdueTotal: round(overdue.reduce((a, m) => a + m.left, 0)) };
+  }
+
   projectSummary(p) {
+    const ms = this.milestones(p);
     return {
       id: p.id, title: p.title, client: this.clientName(p.clientId), clientId: p.clientId, status: STATUS_LABELS[p.status] || p.status,
       description: p.description || null,
       links: { preview: p.previewUrl || null, live: p.liveUrl || null, github: p.githubUrl || null },
       startDate: p.startDate, dueDate: p.dueDate, overdue: !!(p.dueDate && p.status !== 'done' && p.dueDate < todayIST()),
-      money: this.projectStats(p)
+      money: { ...this.projectStats(p), ...(ms.length ? { overdue: round(ms.reduce((a, m) => a + (m.state === 'overdue' ? m.left : 0), 0)) } : {}) },
+      ...(ms.length ? { milestones: ms } : {})
     };
   }
 
@@ -137,11 +168,13 @@ class Ledger {
     const owed = this.owed();
     const counts = {}; this.projects.forEach(p => { const l = STATUS_LABELS[p.status] || p.status; counts[l] = (counts[l] || 0) + 1; });
     const undated = this.txns.filter(t => !t.date).length;
+    const ms = this.milestoneAlerts();
     return {
       currency: 'INR', period: r.label, from: r.from, to: r.to, ...s,
       marginPercent: s.revenue > 0 ? Math.round(s.profit / s.revenue * 100) : null,
       payments: tx.filter(t => t.type !== 'out').length, expenses: tx.filter(t => t.type === 'out').length,
       stillToCollect: round(owed.reduce((a, x) => a + x.stillToCollect, 0)),
+      overdueFromMilestones: ms.overdueTotal, overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
       pipelineFromLeads: round(this.projects.filter(p => p.status === 'lead').reduce((a, p) => a + p.quoted, 0)),
       projectsByStatus: counts, clients: this.clients.length,
       byMonth: Object.keys(byMonth).sort().map(k => ({ month: k, revenue: round(byMonth[k].revenue), spending: round(byMonth[k].spending), profit: round(byMonth[k].revenue - byMonth[k].spending) })),
@@ -177,11 +210,13 @@ class Ledger {
     const t = todayIST();
     const open = this.projects.filter(p => p.status !== 'done');
     const soon = new Date(Date.now() + 5.5 * 3600e3 + 7 * 864e5).toISOString().slice(0, 10);
+    const ms = this.milestoneAlerts();
     const lastPaid = p => this.txns.filter(x => x.projectId === p.id && x.type !== 'out' && x.date).map(x => x.date).sort().pop() || null;
     return {
       currency: 'INR', today: t,
       overdueProjects: open.filter(p => p.dueDate && p.dueDate < t).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate, status: STATUS_LABELS[p.status] })),
       dueWithinAWeek: open.filter(p => p.dueDate && p.dueDate >= t && p.dueDate <= soon).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate })),
+      overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
       stillToCollect: this.owed().map(o => ({ ...o, lastPayment: lastPaid(this.project(o.projectId)) })),
       openLeads: this.projects.filter(p => p.status === 'lead').map(p => ({ id: p.id, project: this.projectLabel(p), quoted: p.quoted, added: (p.createdAt || '').slice(0, 10) })),
       onHold: this.projects.filter(p => p.status === 'paused').map(p => ({ id: p.id, project: this.projectLabel(p) })),

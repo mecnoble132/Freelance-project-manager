@@ -5,7 +5,7 @@ The work plan for the next features, for whoever picks it up next, human or AI. 
 | Phase | What | Status |
 |---|---|---|
 | A | Financial year view (the automated tests are done) | Released |
-| B | Payment milestones | Not started |
+| B | Payment milestones | Released |
 | C | Invoices (UPI QR, TDS) and chasing payments | Not started |
 | D | Renewals and retainers | Not started |
 | E | Leads and quotes | Not started |
@@ -41,7 +41,7 @@ Money is in rupees, dates are `YYYY-MM-DD` in India time, and the owner is the o
 ### Releasing a phase
 
 1. Build the phase **with its tests** (follow "When you add a feature" in `tests/README.md`). Run `node --test tests/*.test.js` and `node --test tests/e2e/*.test.js`; everything must pass, old tests included, and the GitHub check must be green.
-2. Run `supabase/schema.sql` in the Supabase SQL editor **before** merging (changes only add things, so the live code keeps working). Run it twice: the second run must succeed too.
+2. Run `supabase/schema.sql` on the live database **before** merging (changes only add things, so the live code keeps working). Run it twice: the second run must succeed too. The owner wants Claude to do this itself, through the Supabase connector (`execute_sql` on the `client-ledger` project), not to ask them. The connector times out on long runs and on `drop policy`, and each timed-out call rolls back: run the file in parts, and for a new table's policy just `create policy` once. Then check the result with queries on `pg_policies`, `pg_constraint` and `pg_indexes`.
 3. Merge, then go through the phase's **Check** list on the live site and in Claude, plus section 4. Every item in a **Check** list must be an automated test first (server tests for numbers and tools, `tests/e2e/website.test.js` for screens and buttons); on the live site you only glance at it.
 4. If something breaks: Vercel → Deployments → Instant Rollback, then fix on a new branch.
 5. Update `README.md` and the table above.

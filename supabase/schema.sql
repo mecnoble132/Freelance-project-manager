@@ -102,3 +102,28 @@ create policy "own activity" on public.activity_log
   for all to authenticated
   using (user_id = (select auth.uid()))
   with check (user_id = (select auth.uid()));
+
+-- Payment milestones (added later): a project's price split into stages, paid off in order by the project's money in.
+create table if not exists public.milestones (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
+  name text not null default '',
+  amount numeric(12, 2) not null check (amount > 0),
+  due_date date,
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists milestones_user_idx on public.milestones (user_id);
+create index if not exists milestones_project_idx on public.milestones (project_id);
+alter table public.milestones enable row level security;
+drop policy if exists "own milestones" on public.milestones;
+create policy "own milestones" on public.milestones
+  for all to authenticated
+  using (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+-- Every table the MCP server can change must be in this list, or its changes can't be logged and undone.
+alter table public.activity_log drop constraint if exists activity_log_table_name_check;
+alter table public.activity_log add constraint activity_log_table_name_check
+  check (table_name in ('clients', 'projects', 'txns', 'milestones'));

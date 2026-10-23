@@ -11,6 +11,7 @@ My personal web app for running my website development service: every client, ev
 - **Dashboard**: revenue, spending, profit and margin for this financial year (April–March, the default), last financial year, this month, the last 12 months, this calendar year or all time; money still to collect; a month-by-month chart of money in and out; most profitable projects; where the money went by category; recent money
 - **Projects**: every project as a card with its client, status (Lead, In progress, On hold, Done), description, preview / live / GitHub links, quoted price, how much is paid, spent and profit. Filter by status and search
 - **Project page**: all of the above plus start and due dates and every payment and expense on it
+- **Payment milestones**: split a project's price into stages (quick 50/50 or 50/30/20 splits, or your own), each with a due date. Payments cover them in order, so each shows as paid, part paid, not paid yet or overdue, and projects with an overdue milestone show "₹X overdue"
 - **Clients**: each client's projects, revenue, profit, contact and notes. A new client can be added on its own or while creating a project
 - **Money**: every payment (money in) and expense (money out, with a category like Domain or Hosting), filterable by type, period and text. Tap any entry to edit or delete it
 - Email and password sign-in, with password reset
@@ -24,6 +25,7 @@ A static site with no build step: `index.html` (HTML, CSS and plain JavaScript),
 | `clients` | `name`, `contact`, `notes`, `sort_order` |
 | `projects` | `client_id`, `name`, `status`, `description`, `quoted` (₹), `preview_url`, `live_url`, `github_url`, `start_date`, `due_date` |
 | `txns` | `client_id`, `project_id`, `type` (`in` / `out`), `amount` (₹), `category`, `note`, `date` |
+| `milestones` | `project_id`, `name`, `amount` (₹), `due_date`, `sort_order` |
 
 Every table also has `id`, `user_id` and `created_at`. Row-level security lets each signed-in user see and change only their own rows, and sign-ups are turned off, so my account is the only one.
 
@@ -46,9 +48,9 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 |---|---|
 | `get_summary` | Revenue, spending, profit, margin, still to collect, monthly totals, spending by category, top projects, for any period (including this and last financial year) |
 | `compare_periods` | Two periods side by side (this vs last month, this vs last financial year, this vs last year, or any dates) |
-| `get_attention_items` | Overdue and soon-due projects, money owed, open leads, projects on hold, missing quotes and links |
+| `get_attention_items` | Overdue and soon-due projects and payment milestones, money owed, open leads, projects on hold, missing quotes and links |
 | `search` | Clients, projects and money entries containing some text |
-| `list_projects` / `get_project` | Projects with client, status, description, links, dates and money; one project's entries |
+| `list_projects` / `get_project` | Projects with client, status, description, links, dates, money and milestones; one project's entries |
 | `list_clients` / `get_client` | Clients with totals; one client's projects and entries |
 | `list_transactions` | Payments and expenses, filtered by type, dates, client, project or category |
 | `list_recent_changes` | Changes made through the assistant, and whether they were undone |
@@ -59,6 +61,7 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 |---|---|
 | `create_client` / `update_client` / `delete_client` | Add, edit or delete a client (deleting also removes their projects and money) |
 | `create_project` / `update_project` / `delete_project` | Add a project (with a new client if needed), change any field or move it to another client, or delete it |
+| `set_milestones` | Replace a project's payment milestones, from a split like `[50, 30, 20]` or a list with amounts and due dates |
 | `add_payment` / `add_expense` / `add_transactions` | Log money in or out, one at a time or many at once |
 | `update_transaction` / `delete_transactions` | Fix or remove money entries |
 | `undo_change` | Revert the latest change, or any earlier one by its `change_id` |

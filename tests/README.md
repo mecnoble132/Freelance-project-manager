@@ -15,7 +15,7 @@ GitHub runs both on every pull request and every push to `main` (`.github/workfl
 
 | File | What it checks |
 |---|---|
-| `ledger.test.js` | Every number the MCP read tools report: periods, totals, still to collect, attention items, finding clients and projects by name |
+| `ledger.test.js` | Every number the MCP read tools report: periods (including financial years), totals, still to collect, milestone states, attention items, finding clients and projects by name |
 | `writes.test.js` | Every change tool: what it saves, what it refuses, two-step deletes, and that `undo_change` puts the data back exactly |
 | `tools.test.js` | The tool list is well formed, and every read tool runs on a full and an empty ledger without changing anything |
 | `oauth.test.js` | Connecting from Claude end to end: discovery, registration, the sign-in page, PKCE, refresh, expiry, then calling tools |
