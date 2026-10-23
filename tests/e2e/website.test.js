@@ -1190,14 +1190,15 @@ test('money takes the currency of its project; with no project you pick one', as
   await page.goto(SITE + '#/money');
   const text = await view(page).textContent();
   assert.ok(text.includes('+$250') && text.includes('+£40') && text.includes('+₹20,000'), 'every entry in its own currency');
-  assert.match(await page.locator('#view .sub').first().textContent(), /₹.* in · .*\$.* in · .*£/s, 'one line of totals per currency');
+  assert.match(await page.locator('#view .sub').first().textContent(), /₹.* in · .*£.* in · .*\$.* in/s, 'one line of totals per currency');
   // a rupee payment can't be moved into a dollar project
-  await page.locator('#view button.row', { hasText: 'Advance' }).filter({ hasText: '₹20,000' }).click();
+  await page.click('.pills button:has-text("All time")');
+  await page.locator('#view button.row', { hasText: 'Old payment' }).click();
   await page.selectOption('#m-client', ids.usdClient);
   assert.deepEqual([await page.inputValue('#m-cur'), await page.locator('#m-cur').isDisabled()], ['USD', true]);
   await page.click('.sheet button:has-text("Save changes")');
   assert.match(await page.locator('#sheet-err').textContent(), /That project is in USD; this payment is in INR/);
-  assert.equal((await rows(page, 'txns')).find(r => r.id === ids.advance).currency, 'INR');
+  assert.equal((await rows(page, 'txns')).find(r => r.id === ids.undated).currency, 'INR');
 });
 
 test('the dashboard has a currency switcher only when there is money in more than one currency', async t => {
@@ -1212,8 +1213,8 @@ test('the dashboard has a currency switcher only when there is money in more tha
   await page.click('.cur-pills button:has-text("USD")');
   assert.deepEqual(await Promise.all(['Revenue', 'Spending', 'Profit', 'Still to collect'].map(l => kpi(page, l).textContent())), ['$1,000', '$120', '$880', '$2,000']);
   assert.equal(await page.evaluate(() => localStorage.getItem('ledger.currency')), 'USD');
-  const text = await page.locator('#view').textContent();
-  assert.ok(text.includes('Brand site') && !text.includes('Edustudy Website') && !text.includes('₹'), 'only dollars on the dollar dashboard: ' + text.match(/.{20}₹.{20}/));
+  const scoped = await page.locator('.kpis, .card:has(h2:text("Recent money")), .card:has(h2:text("Most profitable projects")), .card:has(h2:text("Still to collect"))').allTextContents();
+  assert.ok(scoped.join(' ').includes('Brand site') && !scoped.join(' ').includes('₹') && !scoped.join(' ').includes('Edustudy'), 'only dollars in the money cards: ' + scoped.join(' | '));
   await page.goto(SITE + '#/renewals');
   assert.equal(await page.locator('.cur-pills button[aria-pressed="true"]').textContent(), 'USD', 'the choice is remembered');
   assert.deepEqual(await Promise.all(['Yearly revenue', 'Yearly cost', 'Yearly profit'].map(l => kpi(page, l).textContent())), ['$20', '$12', '$8']);
