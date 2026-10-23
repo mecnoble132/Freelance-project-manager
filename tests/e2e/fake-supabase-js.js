@@ -38,6 +38,7 @@
       update(row) { op = 'update'; payload = row; return b; },
       delete() { op = 'delete'; return b; },
       eq(col, v) { const prev = filter; filter = r => (!prev || prev(r)) && r[col] === v; return b; },
+      in(col, vs) { const prev = filter; filter = r => (!prev || prev(r)) && vs.includes(r[col]); return b; },
       single() { single = true; return b; },
       then(resolve, reject) { return Promise.resolve().then(run).then(resolve, reject); }
     };

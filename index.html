@@ -1005,8 +1005,22 @@ function renderInvoices(v){
   v.appendChild(list.length ? h('div',{class:'list'},list.map(invoiceRow)) : h('div',{class:'empty'},'No invoices here.'));
 }
 
+// Paid comes from payments, so taking a paid invoice back to Draft or Sent means removing the payments recorded for it.
+// Asks first, lists them, and does nothing until confirmed.
+function reopenInvoice(inv,to){
+  const pays=S.txns.filter(t=>t.invoiceId===inv.id && t.type!=='out'), total=pays.reduce((a,t)=>a+t.amount,0);
+  const patch=to==='sent'?{status:'sent',sent_at:inv.sentAt||new Date().toISOString()}:{status:to};
+  const set=async()=>{ await api.update('invoices',inv.id,patch); };
+  if(!pays.length) return quietly(set);
+  confirmSheet('Move '+inv.number+' back to '+(to==='sent'?'Sent':'Draft')+'?',
+    'Its payments ('+pays.map(t=>rs(t.amount)+' on '+fmtDate(t.date)).join(', ')+', '+rs(total)+' in all) will be deleted so it is owed again. To keep them, cancel and edit or delete a payment yourself.',
+    'Delete payments and move back', async()=>{
+      const { error } = await db.from('txns').delete().in('id',pays.map(t=>t.id)); if(error) throw error;
+      await set();
+    });
+}
 // Draft → Sent → Paid, or Cancelled. Overdue and part paid stay in Sent with their label. Paid comes from payments,
-// so moving a card to Paid opens Record payment; an invoice its payments already cover can't go back to Draft or Sent.
+// so moving a card to Paid opens Record payment; moving a paid card back to Draft or Sent deletes its payments (after asking).
 function invoiceBoard(all){
   const col = x => x.state==='cancelled'?'cancelled' : x.state==='paid'?'paid' : x.state==='draft'?'draft' : 'sent';
   const cols=[['draft','Draft'],['sent','Sent'],['paid','Paid'],['cancelled','Cancelled']];
@@ -1014,7 +1028,7 @@ function invoiceBoard(all){
   return board(cols.map(([k,l])=>{
     const xs=sorted.filter(x=>col(x)===k);
     return { key:k, label:l, sub:rs(xs.reduce((a,x)=>a+(k==='sent'?x.due:k==='cancelled'?0:x.i.total),0)), cards:xs.map(x=>({ id:x.i.id, name:x.i.number,
-      moves: k==='paid' ? (x.paid>=x.i.total ? [] : ['draft','sent','cancelled']) : ['draft','sent','paid','cancelled'].filter(t=>t!==k && !(k==='cancelled'&&t==='paid')),
+      moves: k==='paid' ? ['draft','sent','cancelled'] : ['draft','sent','paid','cancelled'].filter(t=>t!==k && !(k==='cancelled'&&t==='paid')),
       body:[h('a',{class:'title num',href:hrefOf({name:'invoice',id:x.i.id})},x.i.number),
         h('div',{class:'sub'},clientName(x.i.clientId)+(projOf(x.i.projectId)?' · '+projOf(x.i.projectId).name:'')),
         h('div',{class:'num'},rs(owing(x)?x.due:x.i.total)+(owing(x)&&x.paid?' due':''))],
@@ -1024,6 +1038,7 @@ function invoiceBoard(all){
   }), (id,to)=>{
     const inv=invOf(id), s=invState(inv);
     if(to==='paid') return openMoneySheet({clientId:inv.clientId,projectId:inv.projectId,invoice:inv,amount:s.due||inv.total});
+    if(s.state==='paid' && to!=='cancelled') return reopenInvoice(inv,to);
     quietly(()=>api.update('invoices',id,to==='sent'?{status:'sent',sent_at:inv.sentAt||new Date().toISOString()}:{status:to}));
   }, 'Invoices by stage');
 }
@@ -1065,6 +1080,7 @@ function renderInvoice(v,id){
         h('button',{class:'btn',type:'button',onclick:()=>window.print()},'Print / PDF'),
         canWrite()&&s.state!=='cancelled'?h('button',{class:'btn',type:'button',onclick:()=>openInvoiceSheet({invoice:inv})},'Edit'):null,
         canWrite()&&inv.status==='draft'?h('button',{class:'btn',type:'button',onclick:act(()=>api.update('invoices',inv.id,{status:'sent',sent_at:new Date().toISOString()}))},'Mark sent'):null,
+        canWrite()&&s.state==='paid'?h('button',{class:'btn',type:'button',onclick:()=>reopenInvoice(inv,'sent')},'Mark unpaid'):null,
         canWrite()&&open&&inv.status!=='draft'?h('button',{class:'btn',type:'button',onclick:()=>openReminderSheet(inv)},'Remind'):null,
         canWrite()&&open?h('button',{class:'btn primary',type:'button',onclick:()=>openMoneySheet({clientId:inv.clientId,projectId:inv.projectId,invoice:inv,amount:s.due})},'Record payment'):null)),
     setupNotice(),

@@ -688,10 +688,16 @@ test('invoices board: Draft, Sent, Paid, Cancelled; moving to Paid records a pay
   assert.deepEqual(await cardTitles(page, 'Sent'), ['INV/2026-27/002']);
   assert.match(await column(page, 'Sent').textContent(), /8 days overdue/);
   assert.deepEqual(await cardTitles(page, 'Paid'), ['INV/2026-27/001', 'INV/2025-26/001']);
-  // Payments cover a paid invoice, so it can't be moved back.
-  assert.equal(await column(page, 'Paid').locator('select').count(), 0);
-  await page.dragAndDrop('.bcard:has-text("INV/2026-27/001")', '.board .bcol[aria-label="Draft"]');
+  // A paid invoice can go back, but only after confirming that its payments are deleted.
+  await page.selectOption('select[aria-label="Move INV/2026-27/001 to"]', 'sent');
+  await page.click('.sheet button.danger');
+  await page.waitForSelector('.sheet', { state: 'detached' });
   assert.equal((await invRow(page, 'INV/2026-27/001')).status, 'sent');
+  assert.equal((await rows(page, 'txns')).filter(x => x.invoice_id === ids.invAdvance).length, 0);
+  assert.deepEqual(await cardTitles(page, 'Paid'), ['INV/2025-26/001']);
+  await page.selectOption('select[aria-label="Move INV/2026-27/001 to"]', 'paid');
+  await page.click('.sheet button:has-text("Save")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
   // Draft → Sent by dragging.
   await page.dragAndDrop('.bcard:has-text("INV/2026-27/003")', '.board .bcol[aria-label="Sent"]');
   await page.waitForFunction(id => window.__store.rows.invoices.find(i => i.id === id).status === 'sent', ids.invDraft);
@@ -808,3 +814,28 @@ for (const colorScheme of ['light', 'dark']) {
     }
   });
 }
+
+test('delete a payment on a paid invoice and it is owed again', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invAdvance });
+  await page.locator('.invoice .stamp.paid').waitFor();
+  await page.locator('.card:has-text("Payments") button.row').first().click();
+  await page.click('.sheet button:has-text("Delete entry")');
+  await page.click('.sheet button.danger:has-text("Delete entry")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.equal((await rows(page, 'txns')).filter(x => x.invoice_id === ids.invAdvance).length, 0);
+  assert.equal(await page.locator('#view .page-head .state.paid').count(), 0);
+});
+
+test('a paid invoice can go back to Sent: its payments are deleted after asking', async t => {
+  const page = await open(t, { hash: '#/invoice/' + ids.invAdvance });
+  await page.click('#view button:has-text("Mark unpaid")');
+  assert.match(await page.locator('.sheet').textContent(), /Move INV\/2026-27\/001 back to Sent\?.*will be deleted/);
+  await page.click('.sheet button:has-text("Cancel")');
+  assert.equal((await rows(page, 'txns')).filter(x => x.invoice_id === ids.invAdvance).length, 1); // cancelling changes nothing
+  await page.click('#view button:has-text("Mark unpaid")');
+  await page.click('.sheet button.danger');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.equal((await rows(page, 'txns')).filter(x => x.invoice_id === ids.invAdvance).length, 0);
+  assert.equal((await invRow(page, 'INV/2026-27/001')).status, 'sent');
+  await page.locator('#view .page-head .state.overdue').waitFor();
+});
