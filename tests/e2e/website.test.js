@@ -560,6 +560,99 @@ test('the site still works before the milestones table exists', async t => {
   await page.waitForSelector('text=Run supabase/schema.sql');
 });
 
+// ---------- renewals ----------
+const svcRowDb = async (page, id) => (await rows(page, 'services')).find(x => x.id === id);
+
+test('renewals: due soon on the dashboard, yearly profit on the renewals page, services on the client page', async t => {
+  const page = await open(t);
+  const rc = card(page, 'Renewals');
+  await rc.waitFor();
+  assert.deepEqual(await rc.locator('.svcrow .title').allTextContents(), ['Hostinger Business', 'geekboz.in']);
+  assert.match(await rc.locator('.svcrow').first().textContent(), /GeekBoz · Hosting · ₹6,000 yearly.*Was due 20 Oct 2026 · 3 days overdue/);
+  assert.match(await rc.locator('.svcrow').nth(1).textContent(), /Renews 5 Nov 2026 · in 13 days/);
+  const red = await rc.locator('.svcrow').first().locator('.sub.out').evaluate(el => getComputedStyle(el).color);
+  const grey = await rc.locator('.svcrow').nth(1).locator('.sub').last().evaluate(el => getComputedStyle(el).color);
+  assert.notEqual(red, grey, 'overdue renewals show in red');
+  await rc.locator('a:has-text("See all")').click();
+  await heading(page).filter({ hasText: 'Renewals' }).waitFor();
+  assert.equal(await kpi(page, 'Yearly revenue').textContent(), '₹31,500');
+  assert.equal(await kpi(page, 'Yearly cost').textContent(), '₹3,800');
+  assert.equal(await kpi(page, 'Yearly profit').textContent(), '₹27,700');
+  assert.equal(await kpi(page, 'Due in 30 days').textContent(), '2');
+  assert.deepEqual(await page.locator('#view .svcrow .title').allTextContents(), ['Hostinger Business', 'geekboz.in', 'Monthly care plan', 'Google Workspace']);
+  assert.match(await page.locator('#view .svcrow').last().textContent(), /Stopped/);
+  assert.equal(await page.locator('#view .svcrow').last().locator('button.btn:has-text("Renew")').count(), 0);
+  await page.goto(SITE + '#/client/' + ids.edustudy);
+  const sec = page.locator('.sec').filter({ has: page.locator('h2', { hasText: 'Services' }) });
+  assert.deepEqual(await sec.locator('.svcrow .title').allTextContents(), ['Monthly care plan', 'Google Workspace']);
+});
+
+test('renew: shows the steps, then logs the cost, makes a draft invoice and moves the date', async t => {
+  const page = await open(t, { hash: '#/renewals' });
+  await page.locator('.svcrow', { hasText: 'Hostinger Business' }).locator('button.btn:has-text("Renew")').click();
+  const steps = await page.locator('.sheet .renew-steps').textContent();
+  assert.match(steps, /Log ₹3,000 spent on Hostinger Business \(Hosting\)/);
+  assert.match(steps, /Create draft invoice INV\/2026-27\/004 to GeekBoz for ₹6,000/);
+  assert.match(steps, /Move the next renewal from 20 Oct 2026 to 20 Oct 2027/);
+  await page.click('.sheet button:has-text("Renew")');
+  await heading(page).filter({ hasText: 'INV/2026-27/004' }).waitFor(); // opens the new invoice, ready to send
+  assert.match(await page.locator('.invoice').textContent(), /Hostinger Business — hosting renewal \(20 Oct 2026 to 19 Oct 2027\)/);
+  assert.equal((await svcRowDb(page, ids.svcHosting)).next_renewal, '2027-10-20');
+  const out = (await rows(page, 'txns')).find(x => x.note === 'Hostinger Business renewal');
+  assert.deepEqual([out.type, Number(out.amount), out.category, out.project_id], ['out', 3000, 'Hosting', ids.gbSite]);
+  // Renew a domain without invoicing: untick that step.
+  await page.goto(SITE + '#/renewals');
+  await page.locator('.svcrow', { hasText: 'geekboz.in' }).locator('button.btn:has-text("Renew")').click();
+  await page.uncheck('#rn-inv');
+  await page.click('.sheet button:has-text("Renew")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  assert.equal((await svcRowDb(page, ids.svcDomain)).next_renewal, '2027-11-05');
+  assert.equal((await rows(page, 'invoices')).filter(i => i.user_id === OWNER).length, 6); // only the hosting one was added
+  // A monthly plan from 31 Jan lands on 28 Feb; it costs nothing, so there's no expense step.
+  await page.locator('.svcrow', { hasText: 'Monthly care plan' }).locator('button.grow').click();
+  await page.fill('#v-next', '2027-01-31');
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.sheet', { state: 'detached' });
+  await page.locator('.svcrow', { hasText: 'Monthly care plan' }).locator('button.btn:has-text("Renew")').click();
+  assert.equal(await page.locator('#rn-exp').isDisabled(), true);
+  assert.match(await page.locator('.sheet .renew-steps').textContent(), /from 31 Jan 2027 to 28 Feb 2027/);
+});
+
+test('add, edit, stop and delete a service', async t => {
+  const page = await open(t, { hash: '#/client/' + ids.edustudy });
+  await page.click('#view button:has-text("+ Add service")');
+  assert.equal(await page.inputValue('#v-client'), ids.edustudy);
+  await page.selectOption('#v-project', ids.eduSite);
+  await page.fill('#v-name', 'edustudy.in');
+  await page.fill('#v-cost', '900');
+  await page.fill('#v-price', '1800');
+  await page.click('.sheet button:has-text("Add service")');
+  await page.waitForSelector('text=Pick the next renewal date.');
+  await page.fill('#v-next', '2027-03-01');
+  await page.check('#v-auto');
+  await page.click('.sheet button:has-text("Add service")');
+  await page.waitForSelector('.svcrow:has-text("edustudy.in")');
+  const x = (await rows(page, 'services')).find(r => r.name === 'edustudy.in');
+  assert.deepEqual([x.client_id, x.project_id, x.kind, Number(x.cost), Number(x.price), x.cycle, x.next_renewal, x.auto_renew, x.active], [ids.edustudy, ids.eduSite, 'domain', 900, 1800, 'yearly', '2027-03-01', true, true]);
+  await page.click('button[aria-label="Edit edustudy.in"]');
+  await page.uncheck('#v-active');
+  await page.click('.sheet button:has-text("Save changes")');
+  await page.waitForSelector('.svcrow:has-text("edustudy.in"):has-text("Stopped")');
+  await page.click('button[aria-label="Edit edustudy.in"]');
+  await page.click('.sheet button:has-text("Delete service")');
+  await page.click('.sheet button.danger');
+  await page.waitForSelector('.svcrow:has-text("edustudy.in")', { state: 'detached' });
+  assert.ok(!(await rows(page, 'services')).some(r => r.name === 'edustudy.in'));
+});
+
+test('the site still works before the services table exists', async t => {
+  const page = await open(t, { missing: ['services'] });
+  await card(page, 'Renewals').waitFor();
+  await page.waitForSelector('text=Track the domains, hosting and care plans');
+  await page.goto(SITE + '#/renewals');
+  await page.waitForSelector('text=No services yet.');
+});
+
 // ---------- boards ----------
 const column = (page, label) => page.locator('.board .bcol[aria-label="' + label + '"]');
 const cardTitles = (page, label) => column(page, label).locator('.bcard .title').allTextContents();
@@ -647,7 +740,7 @@ test('clients: add, edit, and delete with everything', async t => {
   assert.equal(await kpi(page, 'Revenue').textContent(), '₹20,000');
   await page.click('#view button:has-text("Edit")');
   await page.click('.sheet button:has-text("Delete client")');
-  await page.waitForSelector('text=This also deletes their 2 projects, 3 money entries and 3 invoices');
+  await page.waitForSelector('text=This also deletes their 2 projects, 3 money entries, 3 invoices and 2 services');
   await page.click('.sheet button.danger');
   await heading(page).filter({ hasText: 'Clients' }).waitFor();
   assert.ok(!(await rows(page, 'projects')).some(x => x.client_id === ids.edustudy));
@@ -676,7 +769,7 @@ test('unknown pages go back to a list', async t => {
 for (const colorScheme of ['light', 'dark']) {
   test('every page fits a phone screen (' + colorScheme + ')', async t => {
     const page = await open(t, { viewport: { width: 375, height: 800 }, colorScheme });
-    for (const hash of ['#/', '#/projects', '#/clients', '#/money', '#/invoices', '#/invoice/' + ids.invDesign, '#/project/' + ids.gbSite, '#/client/' + ids.edustudy]) {
+    for (const hash of ['#/', '#/projects', '#/clients', '#/money', '#/invoices', '#/invoice/' + ids.invDesign, '#/renewals', '#/project/' + ids.gbSite, '#/client/' + ids.edustudy]) {
       await page.goto(SITE + hash);
       await page.locator('#view h1').first().waitFor();
       const [scroll, width] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
@@ -705,7 +798,7 @@ for (const colorScheme of ['light', 'dark']) {
     const ms = await page.locator('.sheet').boundingBox();
     assert.ok(ms.x >= 0 && ms.x + ms.width <= 375, 'the milestones sheet is wider than the phone');
     assert.ok(await page.locator('.sheet').evaluate(el => el.scrollWidth <= el.clientWidth), 'the milestones sheet scrolls sideways');
-    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoices', 'Your details'], ['#/invoice/' + ids.invDesign, 'Remind']]) {
+    for (const [hash, button] of [['#/invoices', '+ New invoice'], ['#/invoices', 'Your details'], ['#/invoice/' + ids.invDesign, 'Remind'], ['#/renewals', '+ Add service'], ['#/renewals', 'Renew']]) {
       await page.keyboard.press('Escape');
       await page.goto(SITE + hash);
       await page.click('#view button:has-text("' + button + '")');

@@ -1,7 +1,7 @@
 // Changes made through the MCP server. Each tool call is one "change": every row it inserts, updates or deletes
 // is recorded in activity_log under one batch id, so the whole call can be listed and undone.
 const crypto = require('crypto');
-const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory, round, nextInvoiceNumber, addDays } = require('./ledger');
+const { load, Ledger, CATEGORIES, STATUSES, todayIST, guessCategory, round, nextInvoiceNumber, addDays, addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY } = require('./ledger');
 
 class Invalid extends Error {}
 const fail = msg => { throw new Invalid(msg); };
@@ -108,11 +108,13 @@ async function deleteClient(db, a) {
   const c = L.raw.clients.find(x => x.id === r.client.id);
   const projects = L.raw.projects.filter(p => p.client_id === c.id), txns = L.raw.txns.filter(t => t.client_id === c.id);
   const milestones = L.raw.milestones.filter(m => projects.some(p => p.id === m.project_id)), invoices = L.raw.invoices.filter(i => i.client_id === c.id);
-  if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length, invoices: invoices.map(i => i.number),
+  const services = L.raw.services.filter(x => x.client_id === c.id);
+  if (a.confirm !== true) return confirmFirst('deleted', { client: c.name, projects: projects.map(p => p.name), transactions: txns.length, invoices: invoices.map(i => i.number), services: services.map(x => x.name),
     moneyIn: txns.filter(t => t.type !== 'out').reduce((s, t) => s + Number(t.amount), 0), moneyOut: txns.filter(t => t.type === 'out').reduce((s, t) => s + Number(t.amount), 0) });
   const ch = new Change(db, 'Deleted client ' + c.name + ' with ' + projects.length + ' projects and ' + txns.length + ' entries'); await ch.ready();
   for (const t of txns) await ch.remove('txns', t);
   for (const i of invoices) await ch.remove('invoices', i);
+  for (const x of services) await ch.remove('services', x);
   for (const m of milestones) await ch.remove('milestones', m);
   for (const p of projects) await ch.remove('projects', p);
   await ch.remove('clients', c);
@@ -182,6 +184,7 @@ async function deleteProject(db, a) {
   const ch = new Change(db, 'Deleted project ' + label); await ch.ready();
   for (const t of txns) { if (a.delete_transactions) await ch.remove('txns', t); else await ch.update('txns', t, { project_id: null }); }
   for (const i of invoices) await ch.update('invoices', i, { project_id: null, milestone_id: null }); // invoices stay with the client
+  for (const x of L.raw.services.filter(x => x.project_id === p.id)) await ch.update('services', x, { project_id: null }); // and so do services
   for (const m of milestones) await ch.remove('milestones', m);
   await ch.remove('projects', p);
   return done('Deleted ' + label + (txns.length ? (a.delete_transactions ? ' and its ' + txns.length + ' money entries.' : '. Its ' + txns.length + ' money entries are now under "No project".') : '.'), {}, await ch.commit());
@@ -406,6 +409,77 @@ async function logReminder(db, a) {
   return done('Logged a reminder to ' + facts.client + ' for ' + rows.map(r => r.number).join(', ') + '.', {}, await ch.commit());
 }
 
+// ---------- renewals ----------
+function serviceFields(L, a, partial, clientId) {
+  const f = {};
+  if (given(a.name)) { f.name = text(a.name, 200); if (!f.name) fail('Give the service a name, like "geekboz.in" or "Hostinger Business".'); }
+  if (given(a.kind)) { f.kind = text(a.kind).toLowerCase(); if (!SERVICE_KINDS.includes(f.kind)) fail('kind must be one of: ' + SERVICE_KINDS.join(', ') + '.'); }
+  if (given(a.provider)) f.provider = text(a.provider, 200);
+  if (given(a.cost)) f.cost = money(a.cost, { allowZero: true, label: 'Cost' });
+  if (given(a.price)) f.price = money(a.price, { allowZero: true, label: 'Price' });
+  if (given(a.cycle)) { f.cycle = text(a.cycle).toLowerCase(); if (!CYCLE_MONTHS[f.cycle]) fail('cycle must be monthly, quarterly or yearly.'); }
+  if (given(a.next_renewal)) { f.next_renewal = date(a.next_renewal, 'Next renewal'); if (!f.next_renewal) fail('The next renewal date can\'t be empty.'); }
+  if (given(a.auto_renew)) f.auto_renew = a.auto_renew === true;
+  if (given(a.active)) f.active = a.active !== false;
+  if (given(a.notes)) f.notes = text(a.notes, 2000);
+  if (given(a.project)) {
+    if (!a.project) f.project_id = null;
+    else { const r = L.resolveProject(a.project); if (r.error) fail(r.error); if (clientId && r.project.clientId !== clientId) fail('That project belongs to a different client.'); f.project_id = r.project.id; }
+  }
+  if (!partial) { f.name || fail('Give the service a name, like "geekboz.in" or "Hostinger Business".'); f.next_renewal || fail('Say when it next renews (next_renewal, YYYY-MM-DD).'); }
+  return f;
+}
+
+async function addService(db, a) {
+  const L = await load(db);
+  let clientId;
+  if (text(a.project) && !text(a.client)) { const r = L.resolveProject(a.project); if (r.error) return r; clientId = r.project.clientId; }
+  else { const r = L.resolveClient(a.client); if (r.error) return r; clientId = r.client.id; }
+  const f = serviceFields(L, a, false, clientId);
+  const ch = new Change(db, 'Added service ' + f.name); await ch.ready();
+  const [row] = await ch.insert('services', { client_id: clientId, project_id: f.project_id ?? null, kind: f.kind || 'other', name: f.name, provider: f.provider || '',
+    cost: f.cost || 0, price: f.price || 0, cycle: f.cycle || 'yearly', next_renewal: f.next_renewal, auto_renew: !!f.auto_renew, active: f.active !== false, notes: f.notes || '' });
+  const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, [], [], [], [row]);
+  return done('Added ' + row.name + ' for ' + L.clientName(clientId) + ', renewing ' + niceDate(row.next_renewal) + '.', { service: now.serviceSummary(now.services[0]) }, await ch.commit());
+}
+
+async function updateService(db, a) {
+  const L = await load(db);
+  const r = L.resolveService(a.service, a.client); if (r.error) return r;
+  const before = L.raw.services.find(x => x.id === r.service.id);
+  const patch = serviceFields(L, a, true, before.client_id);
+  if (!Object.keys(patch).length) fail('Say what to change on the service.');
+  const ch = new Change(db, 'Edited service ' + before.name); await ch.ready();
+  const row = await ch.update('services', before, patch);
+  const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, [], [], [], [row]);
+  return done('Updated ' + row.name + ' (' + Object.keys(patch).join(', ') + ').', { service: now.serviceSummary(now.services[0]) }, await ch.commit());
+}
+
+// One renewal, as one change so a single undo reverses it all: log what it cost you, invoice the client,
+// and move the renewal date forward one cycle. Shows what it will do first.
+async function renewService(db, a) {
+  const L = await load(db);
+  const r = L.resolveService(a.service, a.client); if (r.error) return r;
+  const svc = r.service, row = L.raw.services.find(x => x.id === svc.id);
+  if (!svc.active) return { error: svc.name + ' is inactive. Set active: true with update_service first.' };
+  const t = todayIST(), next = addMonths(svc.nextRenewal, CYCLE_MONTHS[svc.cycle]), client = L.clientName(svc.clientId);
+  const expense = a.log_expense !== false && svc.cost > 0, invoice = a.create_invoice !== false && svc.price > 0;
+  const number = invoice ? nextInvoiceNumber(L.invoices.map(i => i.number), L.settings.invoicePrefix, t) : null;
+  const period = niceDate(svc.nextRenewal) + ' to ' + niceDate(addDays(next, -1));
+  const steps = [
+    expense ? 'Log ₹' + svc.cost.toLocaleString('en-IN') + ' spent on ' + svc.name + ' (' + KIND_CATEGORY[svc.kind] + ').' : null,
+    invoice ? 'Create draft invoice ' + number + ' to ' + client + ' for ₹' + svc.price.toLocaleString('en-IN') + '.' : null,
+    'Move the next renewal from ' + niceDate(svc.nextRenewal) + ' to ' + niceDate(next) + '.'].filter(Boolean);
+  if (a.confirm !== true) return { confirmation_required: true, message: 'Nothing has been changed yet. Show the user these steps, and call again with confirm: true only after they agree.', service: svc.name, client, steps };
+  const ch = new Change(db, 'Renewed ' + svc.name + ' for ' + client); await ch.ready();
+  if (expense) await ch.insert('txns', { client_id: svc.clientId, project_id: svc.projectId, type: 'out', amount: svc.cost, category: KIND_CATEGORY[svc.kind], note: svc.name + ' renewal', date: t });
+  let inv = null;
+  if (invoice) [inv] = await ch.insert('invoices', { client_id: svc.clientId, project_id: svc.projectId, milestone_id: null, number, issue_date: t, due_date: addDays(t, L.settings.paymentTermsDays),
+    items: [{ description: svc.name + ' — ' + svc.kind + ' renewal (' + period + ')', quantity: 1, rate: svc.price }], total: svc.price, status: 'draft', notes: L.settings.invoiceNotes, sent_at: null });
+  await ch.update('services', row, { next_renewal: next });
+  return done('Renewed ' + svc.name + ': ' + steps.join(' '), { invoice: inv ? inv.number : undefined, nextRenewal: next }, await ch.commit());
+}
+
 // ---------- history and undo ----------
 async function listChanges(db, a) {
   const rows = await db.select('activity_log');
@@ -431,14 +505,14 @@ async function undoChange(db, a) {
   const insertedHere = new Set(entries.filter(e => e.op === 'insert').map(e => e.row_id));
   // Undoing an insert deletes the row; refuse if something added later depends on it.
   for (const e of entries.filter(e => e.op === 'insert')) {
-    const deps = e.table_name === 'clients' ? [...L.raw.projects.filter(p => p.client_id === e.row_id), ...L.raw.txns.filter(t => t.client_id === e.row_id), ...L.raw.invoices.filter(i => i.client_id === e.row_id)]
-      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id), ...L.raw.invoices.filter(i => i.project_id === e.row_id)]
+    const deps = e.table_name === 'clients' ? [...L.raw.projects.filter(p => p.client_id === e.row_id), ...L.raw.txns.filter(t => t.client_id === e.row_id), ...L.raw.invoices.filter(i => i.client_id === e.row_id), ...L.raw.services.filter(x => x.client_id === e.row_id)]
+      : e.table_name === 'projects' ? [...L.raw.txns.filter(t => t.project_id === e.row_id), ...L.raw.milestones.filter(m => m.project_id === e.row_id), ...L.raw.invoices.filter(i => i.project_id === e.row_id), ...L.raw.services.filter(x => x.project_id === e.row_id)]
       : e.table_name === 'milestones' ? L.raw.invoices.filter(i => i.milestone_id === e.row_id)
       : e.table_name === 'invoices' ? L.raw.txns.filter(t => t.invoice_id === e.row_id) : [];
     const later = deps.filter(d => !insertedHere.has(d.id));
     if (later.length) return { error: 'Can\'t undo "' + e.summary + '": ' + later.length + ' newer item(s) were added to what it created. Undo or move those first.' };
   }
-  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones, settings: L.raw.settings, invoices: L.raw.invoices };
+  const current = { clients: L.raw.clients, projects: L.raw.projects, txns: L.raw.txns, milestones: L.raw.milestones, settings: L.raw.settings, invoices: L.raw.invoices, services: L.raw.services };
   const skipped = [];
   for (const e of entries) {
     const exists = current[e.table_name].some(r => r.id === e.row_id);
@@ -451,4 +525,4 @@ async function undoChange(db, a) {
 }
 
 module.exports = { createClient, updateClient, deleteClient, createProject, updateProject, deleteProject, setMilestones, addTransactions, updateTransaction, deleteTransactions,
-  getSettings, updateSettings, createInvoice, updateInvoice, logReminder, listChanges, undoChange, Invalid };
+  getSettings, updateSettings, createInvoice, updateInvoice, logReminder, addService, updateService, renewService, listChanges, undoChange, Invalid };

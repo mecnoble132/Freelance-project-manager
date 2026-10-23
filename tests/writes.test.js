@@ -299,6 +299,76 @@ test('invoices stay right when projects, milestones and clients change', async t
   assert.match((await call(ctx.db, 'undo_change', { change_id: made.change_id })).error, /newer item/);
 });
 
+const svcRow = (store, id) => store.rows.services.find(x => x.id === id);
+
+test('renew a service: preview first, then expense, draft invoice and next date in one change that one undo reverses', async t => {
+  const ctx = setup(t);
+  const before = ctx.store.snapshot();
+  const preview = await call(ctx.db, 'renew_service', { service: 'Hostinger Business' });
+  assert.equal(preview.confirmation_required, true);
+  assert.deepEqual(preview.steps, ['Log ₹3,000 spent on Hostinger Business (Hosting).', 'Create draft invoice INV/2026-27/004 to GeekBoz for ₹6,000.', 'Move the next renewal from 20 Oct 2026 to 20 Oct 2027.']);
+  assert.deepEqual(ctx.store.snapshot(), before);
+  await changeAndUndo(t, ctx, 'renew_service', { service: 'Hostinger Business', confirm: true }, r => {
+    assert.deepEqual([r.invoice, r.nextRenewal], ['INV/2026-27/004', '2027-10-20']);
+    assert.equal(svcRow(ctx.store, ids.svcHosting).next_renewal, '2027-10-20');
+    const out = rows(ctx.store, 'txns').find(x => x.note === 'Hostinger Business renewal');
+    assert.deepEqual([out.type, Number(out.amount), out.category, out.client_id, out.project_id, out.date], ['out', 3000, 'Hosting', ids.geekboz, ids.gbSite, '2026-10-23']);
+    const inv = ctx.store.rows.invoices.find(i => i.number === 'INV/2026-27/004');
+    assert.deepEqual([Number(inv.total), inv.status, inv.client_id, inv.project_id, inv.due_date], [6000, 'draft', ids.geekboz, ids.gbSite, '2026-10-30']);
+    assert.deepEqual(inv.items, [{ description: 'Hostinger Business — hosting renewal (20 Oct 2026 to 19 Oct 2027)', quantity: 1, rate: 6000 }]);
+  });
+  // Undo removed all three: the snapshot check in changeAndUndo proves it.
+});
+
+test('renew without the expense or invoice, a monthly plan from 31 Jan, and an inactive service', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'renew_service', { service: 'geekboz.in', create_invoice: false, confirm: true }, r => {
+    assert.equal(r.invoice, undefined);
+    assert.equal(ctx.store.rows.invoices.filter(i => i.number === 'INV/2026-27/004').length, 0);
+    assert.equal(rows(ctx.store, 'txns').find(x => x.note === 'geekboz.in renewal').category, 'Domain');
+  });
+  await call(ctx.db, 'update_service', { service: 'Monthly care plan', next_renewal: '2027-01-31' });
+  const care = await call(ctx.db, 'renew_service', { service: 'Monthly care plan', confirm: true });
+  assert.equal(care.nextRenewal, '2027-02-28');
+  assert.ok(!rows(ctx.store, 'txns').some(x => x.note === 'Monthly care plan renewal'), 'no expense when it costs you nothing');
+  assert.match((await call(ctx.db, 'renew_service', { service: 'Google Workspace', confirm: true })).error, /inactive/);
+});
+
+test('add and edit services', async t => {
+  const ctx = setup(t);
+  await changeAndUndo(t, ctx, 'add_service', { client: 'Edustudy', project: 'Edustudy Website', name: 'edustudy.in', kind: 'domain', cost: 900, price: 1800, next_renewal: '2027-03-01' }, r => {
+    const x = rows(ctx.store, 'services').find(x => x.name === 'edustudy.in');
+    assert.deepEqual([x.client_id, x.project_id, x.cycle, x.active, x.auto_renew], [ids.edustudy, ids.eduSite, 'yearly', true, false]);
+    assert.equal(r.service.yearlyProfit, 900);
+  });
+  await changeAndUndo(t, ctx, 'add_service', { project: 'GeekBoz Website', name: 'SSL', kind: 'ssl', price: 500, cycle: 'yearly', next_renewal: '2027-01-01' }, () => {
+    assert.equal(rows(ctx.store, 'services').find(x => x.name === 'SSL').client_id, ids.geekboz);
+  });
+  await changeAndUndo(t, ctx, 'update_service', { service: 'geekboz.in', client: 'GeekBoz', price: 2000, active: false, project: '' }, () => {
+    const x = svcRow(ctx.store, ids.svcDomain);
+    assert.deepEqual([Number(x.price), x.active, x.project_id], [2000, false, null]);
+  });
+  const add = a => call(ctx.db, 'add_service', { client: 'GeekBoz', name: 'X', next_renewal: '2027-01-01', ...a });
+  await assert.rejects(add({ kind: 'car' }), /kind must be/);
+  await assert.rejects(add({ cycle: 'weekly' }), /cycle must be/);
+  await assert.rejects(add({ cost: -5 }), /Cost/);
+  await assert.rejects(add({ next_renewal: undefined }), /next renews/);
+  await assert.rejects(add({ project: 'Edustudy Website' }), /different client/);
+  await assert.rejects(call(ctx.db, 'update_service', { service: 'geekboz.in' }), /Say what to change/);
+});
+
+test('services go with their client, and stay with the client when their project is deleted', async t => {
+  const ctx = setup(t);
+  const preview = await call(ctx.db, 'delete_client', { client: 'GeekBoz' });
+  assert.deepEqual(preview.services, ['geekboz.in', 'Hostinger Business']);
+  await changeAndUndo(t, ctx, 'delete_client', { client: 'GeekBoz', confirm: true }, () => {
+    assert.ok(!rows(ctx.store, 'services').some(x => x.client_id === ids.geekboz && x.user_id !== require('./helpers/seed').OTHER));
+  });
+  await changeAndUndo(t, ctx, 'delete_project', { project: 'GeekBoz Website', confirm: true }, () => {
+    assert.deepEqual([svcRow(ctx.store, ids.svcDomain).project_id, svcRow(ctx.store, ids.svcDomain).client_id], [null, ids.geekboz]);
+  });
+});
+
 test('log payments and expenses', async t => {
   const ctx = setup(t);
   await changeAndUndo(t, ctx, 'add_payment', { amount: '₹5,000', project: 'GeekBoz Website', note: 'Second payment' }, r => {

@@ -174,6 +174,32 @@ const TOOLS = [
     description: 'Records that the user reminded a client about an invoice (or all their unpaid invoices), so the next reminder can be firmer. Call it after the user says they sent the message.',
     inputSchema: obj({ invoice: str('Invoice number.'), client: str('Client name, for all their unpaid invoices.') }), run: W.logReminder },
 
+  // ---------- renewals ----------
+  { name: 'list_renewals', title: 'Renewals and retainers', annotations: RO,
+    description: 'Services you renew for clients (domains, hosting, SSL, maintenance, email): what is overdue, what renews soon, every active service with its cost, price, cycle and next renewal, and yearly revenue, cost and profit from them.',
+    inputSchema: obj({ within_days: { type: 'integer', minimum: 0, maximum: 366, description: 'How far ahead counts as due. Defaults to 30.' }, include_inactive: { type: 'boolean' } }),
+    run: read((l, a) => l.listRenewals(a)) },
+  { name: 'add_service', title: 'Add a service to renew', annotations: WRITE,
+    description: 'Adds something that renews on a cycle for a client: a domain, hosting, SSL, a maintenance plan, email, or other. Cost is what you pay each cycle, price is what you charge.',
+    inputSchema: obj({ client: entrySchema.client, project: str('Project it belongs to (optional).'), name: str('e.g. "geekboz.in" or "Hostinger Business".'),
+      kind: { type: 'string', enum: ['domain', 'hosting', 'ssl', 'maintenance', 'email', 'other'] }, provider: str('e.g. GoDaddy, Hostinger.'),
+      cost: { type: 'number', minimum: 0, description: 'What you pay each cycle, in rupees.' }, price: { type: 'number', minimum: 0, description: 'What you charge the client each cycle, in rupees.' },
+      cycle: { type: 'string', enum: ['monthly', 'quarterly', 'yearly'], description: 'Defaults to yearly.' }, next_renewal: day('Next renewal date'),
+      auto_renew: { type: 'boolean' }, notes: str('Anything to remember, like where the login is kept (never the password).') }, ['name', 'next_renewal']),
+    run: W.addService },
+  { name: 'update_service', title: 'Edit a service', annotations: EDIT,
+    description: 'Changes a service\'s details, its next renewal date, or stops it (active: false). Only the fields given are changed.',
+    inputSchema: obj({ service: str('Service name or id.'), client: str('Client name, to pick between services with the same name.'), name: str('New name.'),
+      kind: { type: 'string', enum: ['domain', 'hosting', 'ssl', 'maintenance', 'email', 'other'] }, provider: str('Provider.'), cost: { type: 'number', minimum: 0 }, price: { type: 'number', minimum: 0 },
+      cycle: { type: 'string', enum: ['monthly', 'quarterly', 'yearly'] }, next_renewal: day('Next renewal date'), auto_renew: { type: 'boolean' }, active: { type: 'boolean', description: 'false stops tracking it.' },
+      project: str('Project it belongs to. Empty string detaches it.'), notes: str('Notes.') }, ['service']),
+    run: W.updateService },
+  { name: 'renew_service', title: 'Renew a service', annotations: WRITE,
+    description: 'Renews a service in one change: logs what it cost you as an expense, creates a draft invoice to the client for its price, and moves the next renewal forward one cycle. A single undo_change reverses all three. First call without confirm to see the steps.',
+    inputSchema: obj({ service: str('Service name or id.'), client: str('Client name, to pick between services with the same name.'),
+      log_expense: { type: 'boolean', description: 'Defaults to true (when it has a cost).' }, create_invoice: { type: 'boolean', description: 'Defaults to true (when it has a price).' }, confirm }, ['service']),
+    run: W.renewService },
+
   // ---------- undo ----------
   { name: 'undo_change', title: 'Undo a change', annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     description: 'Reverts one change made through this connection: the latest one by default, or the one with the given change_id. A change made by one tool call is undone as a whole.',
@@ -184,6 +210,7 @@ const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web pr
 Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. A project's price can be split into payment milestones; its money received covers them in order, so each is paid, part-paid, unpaid or overdue (past its due date and not fully paid). Some older entries have no date; they only count under all_time.
 The financial year runs April to March (FY 2026–27 is 2026-04-01 to 2027-03-31). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
 Invoices: numbered like INV/2026-27/001 per financial year, never deleted (cancel instead). A payment linked to an invoice (add_payment with invoice) counts towards it; an invoice is paid when those reach its total, and overdue when past its due date and not paid. No tax (GST or TDS) is used yet. To chase money, use list_overdue and draft_payment_reminder, write the message yourself for the user to send, then log_reminder once they have sent it. This server never sends messages.
+Renewals: services (domains, hosting, SSL, maintenance, email) renew on a monthly, quarterly or yearly cycle with a cost (what the user pays) and a price (what the client pays). renew_service logs the cost, invoices the price and moves the date in one change; it is two-step like deletes.
 Changing data:
 - Before creating or changing anything, make sure you have the details right. If the user's message was vague, sum up what you're about to save and ask first.
 - Several projects can share a title (many are called "Website"), so name the client too.

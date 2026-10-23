@@ -58,14 +58,29 @@ function whatsappNumber(contact) {
   return d.length === 10 ? '91' + d : d.length >= 11 && d.length <= 15 ? d : null;
 }
 
+// Renewals: a cycle moves the date by whole months, landing on the month's last day when it's shorter
+// (31 Jan + 1 month = 28 or 29 Feb; 29 Feb + 1 year = 28 Feb).
+const CYCLE_MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
+const SERVICE_KINDS = ['domain', 'hosting', 'ssl', 'maintenance', 'email', 'other'];
+const KIND_CATEGORY = { domain: 'Domain', hosting: 'Hosting', ssl: 'Software & plugins', email: 'Software & plugins', maintenance: 'Other', other: 'Other' };
+function addMonths(d, n) {
+  const y = Number(d.slice(0, 4)), m = Number(d.slice(5, 7)) - 1 + n, day = Number(d.slice(8, 10));
+  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m, Math.min(day, last))).toISOString().slice(0, 10);
+}
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec'];
+const niceDate = d => Number(d.slice(8, 10)) + ' ' + MONTHS[Number(d.slice(5, 7)) - 1] + ' ' + d.slice(0, 4);
+
 async function load(db) {
-  const [clients, projects, txns, milestones, invoices, settings] = await Promise.all(['clients', 'projects', 'txns', 'milestones', 'invoices', 'settings'].map(t => db.select(t)));
-  return new Ledger(clients, projects, txns, milestones, invoices, settings);
+  const [clients, projects, txns, milestones, invoices, settings, services] = await Promise.all(['clients', 'projects', 'txns', 'milestones', 'invoices', 'settings', 'services'].map(t => db.select(t)));
+  return new Ledger(clients, projects, txns, milestones, invoices, settings, services);
 }
 
 class Ledger {
-  constructor(clients, projects, txns, milestones = [], invoices = [], settings = []) {
-    this.raw = { clients, projects, txns, milestones, invoices, settings };
+  constructor(clients, projects, txns, milestones = [], invoices = [], settings = [], services = []) {
+    this.raw = { clients, projects, txns, milestones, invoices, settings, services };
+    this.services = services.map(r => ({ id: r.id, clientId: r.client_id, projectId: r.project_id || null, kind: r.kind || 'other', name: r.name || '', provider: r.provider || '',
+      cost: Number(r.cost) || 0, price: Number(r.price) || 0, cycle: r.cycle || 'yearly', nextRenewal: r.next_renewal, autoRenew: !!r.auto_renew, active: r.active !== false, notes: r.notes || '' }));
     this.clients = clients.map(r => ({ id: r.id, name: r.name, contact: r.contact || '', notes: r.notes || '', order: r.sort_order ?? 0 }));
     this.projects = projects.map(r => ({
       id: r.id, clientId: r.client_id, title: r.name, status: r.status || 'active', description: r.description || '',
@@ -333,6 +348,7 @@ class Ledger {
       overdueInvoices: this.invoices.map(i => this.invoiceSummary(i)).filter(x => x.state === 'overdue').sort((a, b) => b.daysOverdue - a.daysOverdue),
       openLeads: this.projects.filter(p => p.status === 'lead').map(p => ({ id: p.id, project: this.projectLabel(p), quoted: p.quoted, added: (p.createdAt || '').slice(0, 10) })),
       onHold: this.projects.filter(p => p.status === 'paused').map(p => ({ id: p.id, project: this.projectLabel(p) })),
+      renewalsDue: this.renewalsDue(30),
       missingInfo: {
         projectsWithoutQuote: this.projects.filter(p => p.status !== 'lead' && !p.quoted).map(p => this.projectLabel(p)),
         projectsWithoutLiveLink: this.projects.filter(p => p.status === 'done' && !p.liveUrl).map(p => this.projectLabel(p)),
@@ -385,8 +401,42 @@ class Ledger {
     const r = this.resolveClient(client);
     if (r.error) return r;
     const c = r.client, tx = this.txns.filter(t => t.clientId === c.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const svc = this.services.filter(x => x.clientId === c.id);
     return { currency: 'INR', id: c.id, name: c.name, contact: c.contact || null, notes: c.notes || null, ...sumOf(tx),
-      projects: this.projects.filter(p => p.clientId === c.id).map(p => this.projectSummary(p)), transactions: tx.map(t => this.txnSummary(t)) };
+      projects: this.projects.filter(p => p.clientId === c.id).map(p => this.projectSummary(p)), transactions: tx.map(t => this.txnSummary(t)),
+      services: svc.length ? svc.map(x => this.serviceSummary(x)) : undefined };
+  }
+
+  // ---------- renewals ----------
+  serviceSummary(x) {
+    const t = todayIST(), days = daysBetween(t, x.nextRenewal), p = x.projectId && this.project(x.projectId);
+    return { id: x.id, name: x.name, kind: x.kind, client: this.clientName(x.clientId), project: p ? p.title : null, provider: x.provider || null,
+      cost: x.cost, price: x.price, cycle: x.cycle, nextRenewal: x.nextRenewal, daysUntilRenewal: days, overdue: x.active && days < 0,
+      autoRenew: x.autoRenew, active: x.active, yearlyProfit: round((x.price - x.cost) * 12 / CYCLE_MONTHS[x.cycle]), notes: x.notes || undefined };
+  }
+  // Yearly money from active services: each cycle's price and cost, times the cycles in a year.
+  serviceYearly() {
+    const a = this.services.filter(x => x.active), per = x => 12 / CYCLE_MONTHS[x.cycle];
+    const revenue = round(a.reduce((s, x) => s + x.price * per(x), 0)), cost = round(a.reduce((s, x) => s + x.cost * per(x), 0));
+    return { revenue, cost, profit: round(revenue - cost) };
+  }
+  renewalsDue(days = 30) {
+    const until = addDays(todayIST(), days);
+    return this.services.filter(x => x.active && x.nextRenewal <= until).sort((a, b) => a.nextRenewal.localeCompare(b.nextRenewal)).map(x => this.serviceSummary(x));
+  }
+  listRenewals({ within_days = 30, include_inactive = false } = {}) {
+    const n = Math.max(0, Math.min(366, Number(within_days) || 30));
+    const all = this.services.filter(x => include_inactive || x.active).sort((a, b) => a.nextRenewal.localeCompare(b.nextRenewal)).map(x => this.serviceSummary(x));
+    const due = this.renewalsDue(n);
+    return { currency: 'INR', today: todayIST(), yearly: this.serviceYearly(), overdue: due.filter(x => x.overdue), dueWithinDays: n, due: due.filter(x => !x.overdue), services: all };
+  }
+  resolveService(query, clientQuery) {
+    let pool = this.services;
+    if (clientQuery) { const r = this.resolveClient(clientQuery); if (r.error) return r; pool = pool.filter(x => x.clientId === r.client.id); }
+    const ms = this.find(pool, query, x => x.name);
+    if (ms.length === 1) return { service: ms[0] };
+    if (!ms.length) return { error: 'No service matches "' + query + '".', services: pool.map(x => x.name + ' (' + this.clientName(x.clientId) + ')') };
+    return { error: 'Several services match "' + query + '". Give the client or the id.', matches: ms.map(x => ({ id: x.id, name: x.name, client: this.clientName(x.clientId) })) };
   }
 
   listTransactions({ type, period = 'all_time', from, to, client, project, category, limit = 100 } = {}) {
@@ -403,4 +453,5 @@ class Ledger {
   }
 }
 
-module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, todayIST, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber };
+module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, todayIST, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber,
+  addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY };

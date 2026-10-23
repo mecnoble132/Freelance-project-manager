@@ -15,6 +15,7 @@ My personal web app for running my website development service: every client, ev
 - **Clients**: each client's projects, revenue, profit, contact and notes. A new client can be added on its own or while creating a project
 - **Invoices**: numbered invoices (INV/2026-27/001, restarting each financial year) from line items or straight from a milestone, with your business details, a UPI QR code for the amount due, bank details, and Print / Save as PDF on one A4 page. Mark sent, record payments against them (part payments too), cancel. The **Board** view shows them in Draft, Sent, Paid and Cancelled columns: drag a card to move it, and dragging to Paid records the payment. Paid, part paid and overdue are worked out from the payments. No GST or TDS yet
 - **Chasing payments**: "To collect on invoices" on the dashboard and the Invoices tab, grouped by client with days overdue. On an overdue invoice, Remind writes a message that gets firmer after 7 and 30 days, to copy or send on WhatsApp yourself, then Mark as reminded
+- **Renewals**: the domains, hosting, SSL, care plans and email you renew for clients, with what each costs you and what you charge, monthly, quarterly or yearly. The dashboard shows what renews in the next 30 days (overdue in red); the Renewals page shows yearly revenue, cost and profit; each client's page lists their services. **Renew** shows what it will do, then logs your cost, creates a draft invoice and moves the date on one cycle
 - **Your business details**: name, address, UPI ID, bank details, invoice prefix, payment terms and default notes, printed on invoices
 - **Money**: every payment (money in) and expense (money out, with a category like Domain or Hosting), filterable by type, period and text. Tap any entry to edit or delete it
 - Email and password sign-in, with password reset
@@ -30,6 +31,7 @@ A static site with no build step: `index.html` (HTML, CSS and plain JavaScript),
 | `txns` | `client_id`, `project_id`, `invoice_id`, `type` (`in` / `out`), `amount` (₹), `category`, `note`, `date` |
 | `milestones` | `project_id`, `name`, `amount` (₹), `due_date`, `sort_order` |
 | `invoices` | `client_id`, `project_id`, `milestone_id`, `number`, `issue_date`, `due_date`, `items` (description, quantity, rate), `total` (₹), `status` (`draft` / `sent` / `paid` / `cancelled`), `notes`, `sent_at`, `last_reminded`, `reminder_count` |
+| `services` | `client_id`, `project_id`, `kind` (domain, hosting, ssl, maintenance, email, other), `name`, `provider`, `cost` and `price` (₹ each cycle), `cycle` (monthly / quarterly / yearly), `next_renewal`, `auto_renew`, `active`, `notes` |
 | `settings` | One row: `business_name`, `address`, `phone`, `email`, `upi_id`, `bank_details`, `invoice_prefix`, `payment_terms_days`, `invoice_notes` |
 
 Every table also has `id`, `user_id` and `created_at`. Row-level security lets each signed-in user see and change only their own rows, and sign-ups are turned off, so my account is the only one.
@@ -61,6 +63,7 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 | `list_invoices` / `get_invoice` | Invoices by state (open, overdue, draft, paid, cancelled); one invoice with its lines, payments and UPI link |
 | `list_overdue` | Overdue invoices grouped by client, with days overdue and the last reminder |
 | `draft_payment_reminder` | The facts for a reminder (amounts, days overdue, tone, WhatsApp number); Claude writes the message, nothing is sent |
+| `list_renewals` | Overdue and soon-due renewals, every active service, and yearly revenue, cost and profit from them |
 | `get_settings` | Your business details and invoice settings |
 | `list_recent_changes` | Changes made through the assistant, and whether they were undone |
 
@@ -73,6 +76,7 @@ Every table also has `id`, `user_id` and `created_at`. Row-level security lets e
 | `set_milestones` | Replace a project's payment milestones, from a split like `[50, 30, 20]` or a list with amounts and due dates |
 | `add_payment` / `add_expense` / `add_transactions` | Log money in or out, one at a time or many at once. A payment can be for an invoice |
 | `create_invoice` / `update_invoice` | Invoice a milestone or line items; mark sent, edit, or cancel (never delete) |
+| `add_service` / `update_service` / `renew_service` | Track a renewal; edit or stop it; renew it (cost, invoice and next date in one change, two-step) |
 | `log_reminder` | Record that you reminded a client, so the next reminder is firmer |
 | `update_settings` | Change your business details, UPI ID, invoice prefix and payment terms |
 | `update_transaction` / `delete_transactions` | Fix or remove money entries |
