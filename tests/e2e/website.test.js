@@ -29,9 +29,10 @@ test.after(async () => { if (browser) await browser.close(); });
 // Opens the site on a fresh page. Returns the page and the list of browser errors seen.
 // timezone / locale are the browser's; `settings` changes the owner's settings row (what the app itself uses, so the two can differ);
 // `invited` is the sign-up allow-list, `autoConfirm` signs a new account straight in, `notInvitedMessage` is what a refused sign-up says;
+// `config` changes window.LEDGER_CONFIG after config.js runs (e.g. { sampleData: false });
 // `usd` adds a dollar client, project, payments, invoice and renewal; `empty` starts with no data; `prepare(store)` changes the data before the page loads.
 async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30', missing = [],
-  timezone = 'Asia/Kolkata', locale = 'en-IN', settings, usd = false, empty = false, prepare, invited = [], autoConfirm = false, notInvitedMessage } = {}) {
+  timezone = 'Asia/Kolkata', locale = 'en-IN', settings, usd = false, empty = false, prepare, invited = [], autoConfirm = false, notInvitedMessage, config } = {}) {
   const context = await browser.newContext({ viewport, colorScheme, timezoneId: timezone, locale });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -53,6 +54,7 @@ async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280,
     if (url.startsWith('https://cdn.jsdelivr.net/npm/@supabase/')) return route.fulfill({ contentType: 'text/javascript', body: FAKE_JS });
     if (url.startsWith('https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/')) return route.fulfill({ contentType: 'text/javascript', body: QR_JS }); // the real library, from npm
     if (!url.startsWith(SITE)) return route.fulfill({ status: 200, contentType: 'text/css', body: '' }); // fonts: no network in tests
+    if (config && new URL(url).pathname === '/config.js') return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(ROOT, 'config.js'), 'utf8') + '\nObject.assign(window.LEDGER_CONFIG, ' + JSON.stringify(config) + ');' });
     const file = path.join(ROOT, new URL(url).pathname.replace(/^\/$/, '/index.html'));
     if (!file.startsWith(ROOT) || !fs.existsSync(file)) return route.fulfill({ status: 404, body: 'not found' });
     return route.fulfill({ contentType: TYPES[path.extname(file)] || 'application/octet-stream', body: fs.readFileSync(file) });
@@ -1073,7 +1075,7 @@ test('Settings is one click away from every screen, and not there when signed ou
     assert.equal(await page.locator('#settings-link').getAttribute('aria-current'), 'page');
     assert.equal(await page.locator('.sheet').count(), 0, 'Settings is a page, not a pop-up');
   }
-  assert.deepEqual(await page.locator('.settings-card h2').allTextContents(), ['Business', 'Invoices', 'Region']);
+  assert.deepEqual(await page.locator('.settings-card h2').allTextContents(), ['Business', 'Invoices', 'Region', 'Sample data']); // Sample data while config.js has it on
   assert.equal(await page.locator('#tabs a[aria-current]').count(), 0, 'Settings is not one of the section tabs');
 });
 
@@ -1419,5 +1421,93 @@ for (const colorScheme of ['light', 'dark']) {
     for (const id of ['s-name', 's-currency', 's-fy', 's-tz', 's-locale']) { const b = await page.locator('#' + id).boundingBox(); assert.ok(b.x >= 0 && b.x + b.width <= 375, id + ' is wider than the phone'); }
     const { bg, fg } = await page.evaluate(() => ({ bg: getComputedStyle(document.body).backgroundColor, fg: getComputedStyle(document.querySelector('.first-run h1')).color }));
     assert.notEqual(bg, fg);
+  });
+}
+
+// ---------- sample data (temporary) ----------
+
+const SAMPLE_COUNTS = { clients: 3, projects: 5, milestones: 3, invoices: 2, txns: 13, services: 3, tasks: 4, time_entries: 5 };
+const mineCounts = page => page.evaluate(owner => Object.fromEntries(['clients', 'projects', 'milestones', 'invoices', 'txns', 'services', 'tasks', 'time_entries']
+  .map(t => [t, (window.__store.rows[t] || []).filter(r => r.user_id === owner).length])), OWNER);
+const sampleSaved = page => page.waitForFunction(owner => (window.__store.rows.time_entries || []).some(r => r.user_id === owner && r.note === 'Client call'), OWNER); // the last row it adds
+
+test('load sample data on an empty dashboard (rupees): a full dashboard, with a second currency', async t => {
+  const page = await open(t, { empty: true, settings: { business_name: 'New Studio' } });
+  await page.click('#load-sample');
+  await page.waitForSelector('#sample-note');
+  await sampleSaved(page);
+  assert.deepEqual(await mineCounts(page), SAMPLE_COUNTS);
+  assert.ok((await rows(page, 'clients')).every(c => c.is_sample));
+  assert.deepEqual([...new Set((await rows(page, 'projects')).map(p => p.currency))].sort(), ['INR', 'USD']);
+  await page.click('.pills button:has-text("Last 12 months")');
+  assert.equal(await kpi(page, 'Revenue').textContent(), '₹1,60,000'); // the rupee payments: 3 × 40k for the shop, 30k + 10k for ordering
+  for (const label of ['Spending', 'Still to collect']) assert.notEqual(await kpi(page, label).textContent(), '₹0', label);
+  assert.equal(await page.locator('.pills[aria-label="Currency"] button').count(), 2);
+  assert.equal(await page.locator('#load-sample').count(), 0);
+  // the overdue invoice, renewal and task show up where they should
+  await page.goto(SITE + '#/invoices');
+  await page.locator('#view').getByText(/overdue/i).first().waitFor();
+});
+
+test('load sample data with dollars as the default: amounts are scaled, rupees are the second currency', async t => {
+  const page = await open(t, { empty: true, settings: { business_name: 'New Studio', default_currency: 'USD', locale: 'en-US', timezone: 'America/New_York' }, timezone: 'America/New_York', locale: 'en-US' });
+  await page.click('#load-sample');
+  await sampleSaved(page);
+  const projects = await rows(page, 'projects');
+  const shop = projects.find(p => p.name === 'Shop website');
+  assert.equal([shop.currency, Number(shop.quoted)].join(' '), 'USD 1400'); // 1,20,000 × 0.012 = 1,440, rounded to two figures
+  assert.equal(projects.find(p => p.name === 'Class booking app').currency, 'INR');
+  assert.match(await kpi(page, 'Revenue').textContent(), /^\$/);
+  // dates count back from today in New York
+  const tasks = await rows(page, 'tasks');
+  assert.equal(tasks.find(x => x.title === 'Send the design mockups').due_date, '2026-10-20');
+});
+
+test('remove sample data: only the sample rows go; real data and other users are untouched', async t => {
+  const page = await open(t, { hash: '#/settings' }); // the owner already has real data
+  const before = await page.evaluate(() => JSON.stringify(window.__store.rows));
+  await page.goto(SITE + '#/');
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await page.locator('#load-sample').count(), 0); // not on a dashboard that already has data
+  await page.goto(SITE + '#/settings');
+  await page.click('[data-section="sample"] button:has-text("Load sample data")');
+  await sampleSaved(page);
+  await page.click('[data-section="sample"] button:has-text("Remove sample data")');
+  await page.waitForSelector('text=This also removes anything you added to the sample clients.');
+  await page.click('.sheet button[type=submit]');
+  await page.locator('[data-section="sample"] button:has-text("Load sample data")').waitFor();
+  await page.waitForFunction(owner => !window.__store.rows.clients.some(c => c.is_sample && c.user_id === owner), OWNER); // the other user's sample client stays
+  await page.waitForFunction(() => !window.__store.rows.txns.some(r => r.note === 'Photographer for the menu'));
+  await new Promise(r => setTimeout(r, 300)); // the cascades finish in the background
+  const after = await page.evaluate(() => window.__store.rows), was = JSON.parse(before);
+  for (const t of Object.keys(was)) assert.deepEqual(after[t], was[t], t);
+});
+
+test('remove sample data from the dashboard notice: the ledger is empty again', async t => {
+  const page = await open(t, { empty: true, settings: { business_name: 'New Studio' } });
+  await page.click('#load-sample');
+  await sampleSaved(page);
+  await page.click('#sample-note button:has-text("Remove sample data")');
+  await page.click('.sheet button[type=submit]');
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  await page.locator('#load-sample').waitFor(); // empty again, so the button is back
+  await page.waitForFunction(() => ['clients', 'projects', 'txns', 'invoices', 'services', 'milestones', 'tasks', 'time_entries'].every(t => !window.__store.rows[t].length));
+});
+
+test('no sample data buttons when config.js turns them off', async t => {
+  const page = await open(t, { empty: true, settings: { business_name: 'New Studio' }, config: { sampleData: false } });
+  await page.waitForSelector('text=Nothing here yet.');
+  assert.equal(await page.locator('#load-sample').count(), 0);
+  await page.goto(SITE + '#/settings');
+  await page.locator('#s-name').waitFor();
+  assert.equal(await page.locator('[data-section="sample"]').count(), 0);
+});
+
+for (const colorScheme of ['light', 'dark']) {
+  test('the dashboard with sample data fits a phone screen (' + colorScheme + ')', async t => {
+    const page = await open(t, { empty: true, settings: { business_name: 'New Studio' }, viewport: { width: 375, height: 800 }, colorScheme });
+    await page.click('#load-sample');
+    await page.waitForSelector('#sample-note');
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the page scrolls sideways');
   });
 }

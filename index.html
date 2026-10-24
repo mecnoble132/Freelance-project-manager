@@ -163,6 +163,7 @@ textarea{resize:vertical;min-height:90px}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--bg);padding:4px;border-radius:12px}
 .seg button{font:inherit;font-weight:600;border:none;border-radius:9px;padding:10px;background:none;color:var(--muted);cursor:pointer}
 .first-run-page{margin:6vh auto 0}
+.empty-actions{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center}
 .first-run h1{font-size:26px}
 .seg button[aria-pressed="true"].in{background:var(--in);color:#fff}
 .seg button[aria-pressed="true"].out{background:var(--out);color:#fff}
@@ -444,9 +445,11 @@ function renderHome(v){
       kpi('Still to collect', rs(owed,cur), 'Quoted, not yet paid · all time'),
       kpi('Projects', String(nActive), 'in progress · '+nLeads+(nLeads===1?' lead':' leads')+(pipeline?' worth '+compact(pipeline,cur):''))));
   if(!S.projects.length && !S.txns.length){
-    v.appendChild(h('div',{class:'empty'},'Nothing here yet. Add your first project — with its client, links and price — then log payments and expenses against it.'));
+    v.appendChild(h('div',{class:'empty'},'Nothing here yet. Add your first project — with its client, links and price — then log payments and expenses against it.',
+      sampleOn() && !S.clients.length ? h('div',{class:'empty-actions'},h('span',{class:'muted'},'Or look around first: '),h('button',{class:'btn',type:'button',id:'load-sample',onclick:loadSample},'Load sample data')) : null));
     return;
   }
+  if(sampleOn() && hasSample()) v.insertBefore(h('div',{class:'notice',id:'sample-note'},'You’re looking at sample data. ',h('button',{class:'linkbtn',type:'button',onclick:confirmRemoveSample},'Remove sample data')), v.querySelector('.kpis'));
   // chart + side lists
   const buckets = periodBuckets(p);
   buckets.forEach(b=>{ const s=sumOf(mine.filter(t=>(t.date||'').startsWith(b.key))); b.in=s.earned; b.out=s.spent; });
@@ -1388,7 +1391,15 @@ function renderSettings(v){
     h('div',{class:'two'},field('s-tz','Time zone',r.tz,'e.g. Asia/Kolkata, Europe/London, America/New_York'),field('s-locale','Number and date style',r.loc)), r.tzList
   ], r.read, 'Save region settings');
 
-  v.appendChild(h('div',{class:'settings-page'},business,invoices,regional));
+  // 4. Sample data (temporary, while people are trying the app): only while config.js has sampleData on.
+  const sample = sampleOn() ? h('section',{class:'card settings-card','aria-label':'Sample data','data-section':'sample'},
+    h('h2',null,'Sample data'),
+    hasSample()
+      ? [h('p',{class:'muted',style:'margin:0'},'Sample clients, projects and money are in your ledger. Removing them deletes the sample clients and everything attached to them.'),
+         h('div',{class:'save-row'},h('button',{class:'btn danger',type:'button',onclick:confirmRemoveSample},'Remove sample data'))]
+      : [h('p',{class:'muted',style:'margin:0'},'Fill your ledger with a few made-up clients, projects, payments, invoices and renewals to see how everything looks. You can remove them again in one go; your own entries are never touched.'),
+         h('div',{class:'save-row'},h('button',{class:'btn',type:'button',onclick:loadSample},'Load sample data'))]) : null;
+  add(v, h('div',{class:'settings-page'},business,invoices,regional,sample));
 }
 
 // The message is written here and sent by you (copy it, or open WhatsApp). Nothing is sent from the app.
@@ -1531,6 +1542,80 @@ function openRenewSheet(x){
   }, 'Renew', {noFocus:true});
 }
 
+// ---------- sample data (temporary) ----------
+// A few made-up clients (is_sample = true) with projects, money, invoices, renewals, tasks and time, all hanging off them,
+// so deleting the sample clients removes the lot through the usual cascades. Dates count back from today in the user's time zone.
+// Amounts are written in rupees and scaled to the currency, rounded to two significant figures so they look like real prices.
+const sampleOn = () => !!cfg.sampleData && canWrite();
+const hasSample = () => S.clients.some(c=>c.isSample);
+const SAMPLE_SCALE = {INR:1, USD:0.012, EUR:0.011, GBP:0.0095, AUD:0.018, CAD:0.016, SGD:0.016, AED:0.044, NZD:0.02, CHF:0.0105, JPY:1.8, ZAR:0.21};
+const tidy = v => { if(v<=0) return 0; const p=Math.pow(10,Math.max(0,Math.floor(Math.log10(v))-1)); return Math.max(1,Math.round(v/p)*p); };
+let loadingSample=false;
+async function loadSample(){
+  if(loadingSample || hasSample()) return;
+  loadingSample=true;
+  try{
+    const b=biz(), main=b.defaultCurrency, other=CURRENCIES.find(c=>c!==main), t=today(), d=n=>addDays(t,n);
+    const amt=(inr,cur)=>tidy(inr*SAMPLE_SCALE[cur]);
+    const client=(name,contact,notes,i)=>api.insert('clients',{name,contact,notes,sort_order:-100+i,is_sample:true});
+    const bloom=await client('Bloom Florist (sample)','priya@bloomflorist.example','Sample client: delete it any time from Settings.',0);
+    const cafe=await client('Northwind Cafe (sample)','+44 20 7946 0000','Sample client: delete it any time from Settings.',1);
+    const gym=await client('Atlas Fitness (sample)','hello@atlasfit.example','Sample client: pays in '+other+'.',2);
+    const project=(client_id,cur,name,status,description,quoted,start,due)=>api.insert('projects',{client_id,currency:cur,name,status,description,quoted:amt(quoted,cur),start_date:start,due_date:due});
+    const shop=await project(bloom,main,'Shop website','done','Online shop with delivery slots and gift messages.',120000,d(-330),d(-240));
+    const blog=await project(bloom,main,'Blog and SEO','lead','Monthly blog posts and search tune-up. Waiting for a yes.',45000,null,null);
+    const order=await project(cafe,main,'Online ordering','active','Order-ahead menu with card payments and pickup times.',90000,d(-70),d(30));
+    const app=await project(gym,other,'Class booking app','active','Members book classes and pay for passes.',200000,d(-160),d(60));
+    const landing=await project(gym,other,'Landing page refresh','paused','New photos and copy. On hold until the new studio opens.',35000,d(-210),null);
+    // Milestones on the ordering project: the deposit is paid, the design payment is overdue, the launch is still to come.
+    const ms=(name,inr,due,i)=>api.insert('milestones',{project_id:order,name,amount:amt(inr,main),due_date:due,sort_order:i});
+    const deposit=await ms('Deposit',30000,d(-60),0), design=await ms('Design approved',30000,d(-10),1); await ms('Launch',30000,d(30),2);
+    // One paid invoice and one overdue one (part-paid).
+    const invoice=async(milestone_id,name,inr,issue,due,status)=>{ const total=amt(inr,main);
+      return api.insert('invoices',{client_id:cafe,project_id:order,milestone_id,currency:main,number:nextInvoiceNumber(b.invoicePrefix,issue),issue_date:issue,due_date:due,
+        items:[{description:'Online ordering — '+name,quantity:1,rate:total}],total,status,notes:b.invoiceNotes,sent_at:new Date(parseD(issue)).toISOString()}); };
+    const invPaid=await invoice(deposit,'Deposit',30000,d(-65),d(-58),'paid');
+    const invLate=await invoice(design,'Design approved',30000,d(-24),d(-10),'sent');
+    // Payments and expenses across the last year, so the chart has shape.
+    const money=(client_id,project_id,cur,type,inr,date,note,category,invoice_id)=>api.insert('txns',{client_id,project_id,currency:cur,type,amount:amt(inr,cur),date,note,category:category||'',invoice_id:invoice_id||null});
+    await money(bloom,shop,main,'in',40000,d(-320),'Deposit');
+    await money(bloom,shop,main,'out',6000,d(-300),'Hosting for the shop','Hosting');
+    await money(bloom,shop,main,'out',3500,d(-290),'Premium theme','Design assets');
+    await money(bloom,shop,main,'in',40000,d(-270),'Second payment');
+    await money(bloom,shop,main,'in',40000,d(-230),'Final payment');
+    await money(gym,landing,other,'in',10000,d(-200),'Deposit');
+    await money(gym,app,other,'in',50000,d(-150),'Deposit');
+    await money(gym,app,other,'out',4000,d(-100),'Booking plugin licence','Software & plugins');
+    await money(gym,app,other,'in',50000,d(-90),'Beta delivered');
+    await money(cafe,order,main,'in',30000,d(-58),'Deposit','',invPaid);
+    await money(cafe,order,main,'out',15000,d(-40),'Photographer for the menu','Contractor');
+    await money(cafe,order,main,'in',10000,d(-20),'Part of the design payment','',invLate);
+    await money(cafe,order,main,'out',2500,d(-12),'Ads for the launch','Ads & marketing');
+    // Renewals: one overdue, one due soon, one later.
+    const svc=(client_id,project_id,kind,name,provider,cost,price,cycle,next,auto_renew)=>api.insert('services',{client_id,project_id,currency:main,kind,name,provider,cost:amt(cost,main),price:amt(price,main),cycle,next_renewal:next,auto_renew,active:true});
+    await svc(cafe,order,'hosting','northwindcafe.example hosting','Hostinger',5000,8000,'yearly',d(-5),false);
+    await svc(bloom,shop,'domain','bloomflorist.example','Namecheap',900,1500,'yearly',d(12),true);
+    await svc(bloom,shop,'maintenance','Monthly care plan','',0,3000,'monthly',d(45),false);
+    // Tasks (one overdue) and logged time.
+    const task=(project_id,title,due,done,i)=>api.insert('tasks',{project_id,title,due_date:due,done,done_at:done?new Date().toISOString():null,sort_order:i});
+    await task(order,'Collect menu photos',d(-30),true,0);
+    await task(order,'Send the design mockups',d(-3),false,1);
+    await task(order,'Set up card payments',d(5),false,2);
+    await task(app,'Write the booking reminders',d(14),false,0);
+    const time=(project_id,minutes,date,note)=>api.insert('time_entries',{project_id,minutes,date,note});
+    await time(shop,600,d(-250),'Build and launch');
+    await time(app,300,d(-80),'Booking screens');
+    await time(order,180,d(-30),'Menu layout');
+    await time(order,240,d(-15),'Checkout');
+    await time(order,90,d(-2),'Client call');
+  } finally { loadingSample=false; }
+}
+function confirmRemoveSample(){
+  const n=S.clients.filter(c=>c.isSample).length;
+  confirmSheet('Remove sample data?','This deletes the '+n+' sample '+(n===1?'client':'clients')+' and their projects, money, invoices, renewals, tasks and time. This also removes anything you added to the sample clients. Your other clients are not touched.',
+    'Remove sample data', async ()=>{ for(const c of S.clients.filter(c=>c.isSample)) await api.del('clients',c.id); });
+}
+
 // ---------- login and sign-up ----------
 // Sign-up is invite-only: the database refuses any email that isn't on the owner's allow-list (allowed_emails in schema.sql).
 // Supabase hides the trigger's own message behind "Database error saving new user", so both mean "not invited".
@@ -1623,7 +1708,7 @@ const TABLES = ['clients','projects','txns','milestones','invoices','settings','
 const OPTIONAL = ['milestones','invoices','settings','services','tasks','time_entries']; // added later: an empty list until supabase/schema.sql is re-run, so the app still loads
 // Columns added for the dashboard default to empty, so the app still loads before supabase/schema.sql is re-run.
 const map = {
-  clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, createdAt:ms(r.created_at) }),
+  clients: r => ({ id:r.id, name:r.name, contact:r.contact||'', notes:r.notes||'', order:r.sort_order, isSample:!!r.is_sample, createdAt:ms(r.created_at) }),
   projects: r => ({ id:r.id, clientId:r.client_id, currency:curOf(r.currency), name:r.name, status:r.status||'active', description:r.description||'', quoted:Number(r.quoted)||0,
     previewUrl:cleanUrl(r.preview_url)||'', liveUrl:cleanUrl(r.live_url)||'', githubUrl:cleanUrl(r.github_url)||'', startDate:r.start_date||null, dueDate:r.due_date||null, createdAt:ms(r.created_at) }),
   txns: r => ({ id:r.id, clientId:r.client_id, projectId:r.project_id, currency:curOf(r.currency), type:r.type, amount:Number(r.amount), category:r.category||(r.type==='out'?guessCategory(r.note):''), note:r.note||'', date:r.date, invoiceId:r.invoice_id||null, createdAt:ms(r.created_at) }),

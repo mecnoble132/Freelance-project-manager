@@ -3,5 +3,8 @@
 // Never put the service_role key here.
 window.LEDGER_CONFIG = {
   supabaseUrl: "https://yumzxdjozoqzgirmwggc.supabase.co",
-  supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1bXp4ZGpvem9xemdpcm13Z2djIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI2Njk0MjYsImV4cCI6MjEwODI0NTQyNn0.DhVk5pwrYFkbL0Sh20D2AwVlLW3iqFf_hgfbiUwXB34"
+  supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1bXp4ZGpvem9xemdpcm13Z2djIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI2Njk0MjYsImV4cCI6MjEwODI0NTQyNn0.DhVk5pwrYFkbL0Sh20D2AwVlLW3iqFf_hgfbiUwXB34",
+  // Shows the "Load sample data" buttons (dashboard and Settings) so testers can look around first.
+  // Temporary: set to false, or remove the feature, before any public launch. Missing means off.
+  sampleData: true
 };
