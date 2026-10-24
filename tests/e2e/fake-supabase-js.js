@@ -60,6 +60,19 @@
             emit('SIGNED_IN');
             return { data: { session }, error: null };
           },
+          // Like the real gate: an email not on init.invited (case-insensitive) is refused with init.notInvitedMessage.
+          // A new user is unconfirmed (no session) unless init.autoConfirm, which signs them straight in.
+          async signUp({ email, password, options }) {
+            window.__calls.push(['signUp', email, options && options.emailRedirectTo]);
+            if (!(init.invited || []).some(x => x.toLowerCase() === email.toLowerCase())) return { data: { user: null, session: null }, error: { message: init.notInvitedMessage || 'Database error saving new user', status: 500 } };
+            if (password.length < 6) return { data: { user: null, session: null }, error: { message: 'Password should be at least 6 characters.' } };
+            const u = { id: '00000000-0000-4000-8000-0000000000' + String(10 + init.users.length), email, password };
+            init.users.push(u);
+            if (!init.autoConfirm) return { data: { user: { id: u.id, email }, session: null }, error: null };
+            session = { user: { id: u.id, email: u.email }, access_token: 'test' };
+            emit('SIGNED_IN');
+            return { data: { user: session.user, session }, error: null };
+          },
           async signOut() { session = null; emit('SIGNED_OUT'); return { error: null }; },
           async resetPasswordForEmail(email, opts) { window.__calls.push(['reset', email, opts && opts.redirectTo]); return { data: {}, error: null }; },
           async updateUser(attrs) { window.__calls.push(['updateUser', Object.keys(attrs)]); return { data: {}, error: null }; },

@@ -162,6 +162,8 @@ textarea{resize:vertical;min-height:90px}
 .amount{font-family:var(--mono);font-size:22px}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;background:var(--bg);padding:4px;border-radius:12px}
 .seg button{font:inherit;font-weight:600;border:none;border-radius:9px;padding:10px;background:none;color:var(--muted);cursor:pointer}
+.first-run-page{margin:6vh auto 0}
+.first-run h1{font-size:26px}
 .seg button[aria-pressed="true"].in{background:var(--in);color:#fff}
 .seg button[aria-pressed="true"].out{background:var(--out);color:#fff}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -372,8 +374,9 @@ function render(){
   const v = $('#view'); v.textContent='';
   const signedIn = !!(S.session && S.session.user);
   $('#signout').hidden = !signedIn;
-  $('#tabs').hidden = !signedIn || !S.ready;
-  $('#settings-link').hidden = !signedIn || !S.ready;
+  const setup = signedIn && S.ready && needsFirstRun();
+  $('#tabs').hidden = !signedIn || !S.ready || setup;
+  $('#settings-link').hidden = !signedIn || !S.ready || setup;
   if(S.view.name==='settings') $('#settings-link').setAttribute('aria-current','page'); else $('#settings-link').removeAttribute('aria-current');
   const tab = {project:'projects',client:'clients',invoice:'invoices'}[S.view.name] || S.view.name;
   document.querySelectorAll('#tabs a').forEach(a=>{ if(a.getAttribute('href')===hrefOf({name:tab})) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current'); });
@@ -384,6 +387,7 @@ function render(){
   if(!S.session){ return renderLogin(v); }
   if(S.error){ v.appendChild(h('div',{class:'empty'},S.error)); return; }
   if(!S.ready){ v.appendChild(h('div',{class:'empty'},'Loading your projects and money…')); return; }
+  if(needsFirstRun()) return renderFirstRun(v);
   ({home:renderHome,projects:renderProjects,project:renderProject,clients:renderClients,client:renderClient,money:renderMoney,invoices:renderInvoices,invoice:renderInvoice,renewals:renderRenewals,settings:renderSettings})[S.view.name](v, S.view.id);
 }
 
@@ -1325,6 +1329,24 @@ function settingsCard(key,title,intro,body,onSave,label){
   });
   return form;
 }
+// The region inputs, shared by the Settings page and the first-run screen. read() returns an error message or the changes to save.
+function regionFields(b){
+  const cur=currencySelect('s-currency',b.defaultCurrency);
+  const fy=h('select',{id:'s-fy'},MONTHS.map((m,i)=>h('option',{value:String(i+1)},m))); fy.value=String(b.fyStartMonth);
+  const zones=(Intl.supportedValuesOf?Intl.supportedValuesOf('timeZone'):['Asia/Kolkata','Asia/Dubai','Asia/Singapore','Europe/London','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','Australia/Sydney','Pacific/Auckland']);
+  const tz=h('input',{id:'s-tz',list:'s-tz-list',value:b.timezone,autocapitalize:'off',spellcheck:'false',autocomplete:'off'});
+  const tzList=h('datalist',{id:'s-tz-list'},zones.map(z=>h('option',{value:z})));
+  const loc=h('select',{id:'s-locale'},LOCALES.map(([k,l])=>h('option',{value:k},l+' · '+new Intl.NumberFormat(k).format(1234567.89)))); loc.value=b.locale;
+  const fyNote=h('div',{class:'hint',id:'s-fy-note',role:'status'});
+  const syncFy=()=>{ fyNote.textContent=fyWords(Number(fy.value))+' Dates are by month, so a tax year that starts part-way through a month (like 6 April) is shown from the 1st.'; };
+  fy.addEventListener('change',syncFy); syncFy();
+  const read=()=>{
+    const z=tz.value.trim();
+    if(!z || validTz(z)!==z) return 'That time zone isn’t recognised. Use a name like Asia/Kolkata, Europe/London or America/New_York.';
+    return {default_currency:cur.value, fy_start_month:Number(fy.value), timezone:z, locale:loc.value};
+  };
+  return {cur, fy, tz, tzList, loc, fyNote, read};
+}
 function renderSettings(v){
   const b=biz(), inp=(id,val,a={})=>h('input',{id,value:val??'',...a}), area=(id,val,ph)=>{ const t=h('textarea',{id,placeholder:ph||''}); t.value=val||''; return t; };
   add(v,
@@ -1357,25 +1379,14 @@ function renderSettings(v){
   }, 'Save invoice settings');
 
   // 3. Regional: currency, financial year, time zone, number and date style.
-  const cur=currencySelect('s-currency',b.defaultCurrency);
-  const fy=h('select',{id:'s-fy'},MONTHS.map((m,i)=>h('option',{value:String(i+1)},m))); fy.value=String(b.fyStartMonth);
-  const zones=(Intl.supportedValuesOf?Intl.supportedValuesOf('timeZone'):['Asia/Kolkata','Asia/Dubai','Asia/Singapore','Europe/London','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','Australia/Sydney','Pacific/Auckland']);
-  const tz=h('input',{id:'s-tz',list:'s-tz-list',value:b.timezone,autocapitalize:'off',spellcheck:'false',autocomplete:'off'});
-  const tzList=h('datalist',{id:'s-tz-list'},zones.map(z=>h('option',{value:z})));
-  const loc=h('select',{id:'s-locale'},LOCALES.map(([k,l])=>h('option',{value:k},l+' · '+new Intl.NumberFormat(k).format(1234567.89)))); loc.value=b.locale;
-  const fyNote=h('div',{class:'hint',id:'s-fy-note',role:'status'}), fyWarn=h('div',{class:'hint warn-note',id:'s-fy-warn'});
-  const syncFy=()=>{ const m=Number(fy.value); fyNote.textContent=fyWords(m)+' Dates are by month, so a tax year that starts part-way through a month (like 6 April) is shown from the 1st.';
-    fyWarn.textContent = m!==b.fyStartMonth ? 'New invoices will be numbered under the new year and start again at 001. Numbers you have already used don’t change.' : ''; };
-  fy.addEventListener('change',syncFy); syncFy();
+  const r=regionFields(b), fyWarn=h('div',{class:'hint warn-note',id:'s-fy-warn'});
+  const syncWarn=()=>{ fyWarn.textContent = Number(r.fy.value)!==b.fyStartMonth ? 'New invoices will be numbered under the new year and start again at 001. Numbers you have already used don’t change.' : ''; };
+  r.fy.addEventListener('change',syncWarn); syncWarn();
   const regional=settingsCard('regional','Region','Used for new projects, your financial year, what “today” is and how amounts and dates are written.',[
-    h('div',{class:'two'},field('s-currency','Default currency',cur,'For new projects, and money with no project. Each project keeps its own currency.'),field('s-fy','Financial year starts in',fy)),
-    fyNote, fyWarn,
-    h('div',{class:'two'},field('s-tz','Time zone',tz,'e.g. Asia/Kolkata, Europe/London, America/New_York'),field('s-locale','Number and date style',loc)), tzList
-  ], ()=>{
-    const z=tz.value.trim();
-    if(!z || validTz(z)!==z) return 'That time zone isn’t recognised. Use a name like Asia/Kolkata, Europe/London or America/New_York.';
-    return {default_currency:cur.value, fy_start_month:Number(fy.value), timezone:z, locale:loc.value};
-  }, 'Save region settings');
+    h('div',{class:'two'},field('s-currency','Default currency',r.cur,'For new projects, and money with no project. Each project keeps its own currency.'),field('s-fy','Financial year starts in',r.fy)),
+    r.fyNote, fyWarn,
+    h('div',{class:'two'},field('s-tz','Time zone',r.tz,'e.g. Asia/Kolkata, Europe/London, America/New_York'),field('s-locale','Number and date style',r.loc)), r.tzList
+  ], r.read, 'Save region settings');
 
   v.appendChild(h('div',{class:'settings-page'},business,invoices,regional));
 }
@@ -1520,32 +1531,88 @@ function openRenewSheet(x){
   }, 'Renew', {noFocus:true});
 }
 
-// ---------- login ----------
+// ---------- login and sign-up ----------
+// Sign-up is invite-only: the database refuses any email that isn't on the owner's allow-list (allowed_emails in schema.sql).
+// Supabase hides the trigger's own message behind "Database error saving new user", so both mean "not invited".
+const notInvited = e => /invited|database error saving new user/i.test((e && e.message) || '');
 function renderLogin(v){
-  const email=h('input',{id:'l-email',type:'email',autocomplete:'email',required:true,placeholder:'you@example.com'});
-  const pass=h('input',{id:'l-pass',type:'password',autocomplete:'current-password',required:true});
+  if(S.loginMode==='sent') return v.appendChild(h('div',{class:'login',role:'status'},
+    h('h1',null,'Check your email'),
+    h('p',{style:'margin:0'},'We sent a link to ',h('strong',null,S.loginEmail),'. Open it to confirm your account, then sign in.'),
+    h('p',{class:'muted',style:'margin:0'},'Nothing there after a few minutes? Look in your spam folder. If you already have an account, just sign in.'),
+    h('button',{class:'btn primary',type:'button',style:'justify-content:center',onclick:()=>{ S.loginMode='signin'; render(); }},'Back to sign in')));
+  const join = S.loginMode==='signup';
+  const email=h('input',{id:'l-email',type:'email',autocomplete:'email',required:true,placeholder:'you@example.com',value:S.loginEmail||''});
+  const pass=h('input',{id:'l-pass',type:'password',autocomplete:join?'new-password':'current-password',required:true,minlength:join?'8':null});
   const err=h('div',{class:'err',role:'alert'});
-  const btn=h('button',{class:'btn primary',type:'submit',style:'justify-content:center'},'Sign in');
-  const reset=h('button',{class:'linkbtn',type:'button'},'Forgot password?');
-  const form=h('form',{class:'login'},
-    h('h1',null,'Client Ledger'),
-    h('div',{class:'muted'},'Private. Sign in to see your projects and money.'),
+  const btn=h('button',{class:'btn primary',type:'submit',style:'justify-content:center'},join?'Create account':'Sign in');
+  const reset=join?null:h('button',{class:'linkbtn',type:'button'},'Forgot password?');
+  const swap=h('button',{class:'linkbtn',type:'button',id:'l-switch',onclick:()=>{ S.loginMode=join?'signin':'signup'; S.loginEmail=email.value; render(); }},join?'Already have an account? Sign in':'New here? Create an account');
+  const form=h('form',{class:'login',novalidate:true},
+    h('h1',null,join?'Create your account':'Client Ledger'),
+    h('div',{class:'muted'},join?'Invite only while we test it: use the email you sent us.':'Private. Sign in to see your projects and money.'),
     h('div',{class:'field'},h('label',{for:'l-email'},'Email'),email),
-    h('div',{class:'field'},h('label',{for:'l-pass'},'Password'),pass),
-    err, btn, reset);
+    h('div',{class:'field'},h('label',{for:'l-pass'},join?'Choose a password (8+ characters)':'Password'),pass),
+    err, btn, reset, swap);
   form.addEventListener('submit',async e=>{
-    e.preventDefault(); err.textContent=''; btn.disabled=true;
-    const { error } = await sb.auth.signInWithPassword({ email:email.value.trim(), password:pass.value });
+    e.preventDefault(); err.textContent='';
+    const em=email.value.trim();
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)){ err.textContent='Type your email address.'; return; }
+    if(join && pass.value.length<8){ err.textContent='Use at least 8 characters for your password.'; return; }
+    if(!join && !pass.value){ err.textContent='Type your password.'; return; }
+    btn.disabled=true;
+    if(!join){
+      const { error } = await sb.auth.signInWithPassword({ email:em, password:pass.value });
+      btn.disabled=false;
+      if(error) err.textContent = /invalid/i.test(error.message) ? 'Wrong email or password.' : /not confirmed/i.test(error.message) ? 'Confirm your email first: open the link we sent you.' : error.message;
+      return;
+    }
+    const { data, error } = await sb.auth.signUp({ email:em, password:pass.value, options:{ emailRedirectTo: location.origin + location.pathname } });
     btn.disabled=false;
-    if(error) err.textContent = /invalid/i.test(error.message) ? 'Wrong email or password.' : error.message;
+    if(error){ err.textContent = notInvited(error) ? 'This email hasn’t been invited yet. Send it to the person who invited you and try again once they’ve added it.' : error.message; return; }
+    if(data && data.session) return; // no confirmation needed: signed in already, and the first-run screen follows
+    // An email that already has an account gets the same answer, so nobody can find out who has signed up.
+    S.loginMode='sent'; S.loginEmail=em; render();
   });
-  reset.addEventListener('click',async ()=>{
+  if(reset) reset.addEventListener('click',async ()=>{
     err.textContent='';
     if(!email.value.trim()){ err.textContent='Type your email first, then tap Forgot password.'; return; }
     const { error } = await sb.auth.resetPasswordForEmail(email.value.trim(), { redirectTo: location.origin + location.pathname });
     err.textContent = error ? error.message : 'If that email has an account, a reset link is on its way.';
   });
-  v.appendChild(form); email.focus();
+  v.appendChild(form); (email.value?pass:email).focus();
+}
+
+// ---------- first run ----------
+// A brand-new account (no settings, no clients, no projects) picks its business name and region before anything else.
+// Time zone comes from the browser and the number style from the currency, so most people just press Start.
+const OLD_ZONES = {'Asia/Calcutta':'Asia/Kolkata','Asia/Saigon':'Asia/Ho_Chi_Minh','Asia/Katmandu':'Asia/Kathmandu','Asia/Rangoon':'Asia/Yangon','Europe/Kiev':'Europe/Kyiv'}; // browsers may still report these
+const LOCALE_FOR = {INR:'en-IN', USD:'en-US', GBP:'en-GB', AUD:'en-AU', CAD:'en-CA'};
+const needsFirstRun = () => S.settingsLoaded && !S.settings.length && !S.clients.length && !S.projects.length;
+function renderFirstRun(v){
+  const zone=Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const r=regionFields({...map.settings({}), timezone:validTz(OLD_ZONES[zone]||zone)});
+  let localeTouched=false;
+  r.loc.addEventListener('change',()=>{ localeTouched=true; });
+  r.cur.addEventListener('change',()=>{ if(!localeTouched) r.loc.value=LOCALE_FOR[r.cur.value]||'en-GB'; });
+  const name=h('input',{id:'s-name',placeholder:'e.g. Mec Web Studio',autocomplete:'organization'});
+  const err=h('div',{class:'err',role:'alert'});
+  const form=h('form',{class:'card settings-card first-run','aria-label':'Set up your ledger',novalidate:true},
+    h('h1',null,'Welcome to Client Ledger'),
+    h('p',{class:'muted',style:'margin:0'},'A few details first. You can change any of them later in Settings.'),
+    field('s-name','Business name',name,'Printed on your invoices. Your own name is fine.'),
+    h('div',{class:'two'},field('s-currency','Currency',r.cur,'For new projects. Each project can have its own.'),field('s-fy','Financial year starts in',r.fy)),
+    r.fyNote,
+    h('div',{class:'two'},field('s-tz','Time zone',r.tz,'Decides what “today” is for due dates'),field('s-locale','Number and date style',r.loc)), r.tzList,
+    err,
+    h('div',{class:'save-row'},h('button',{class:'btn primary',type:'submit'},'Start')));
+  form.addEventListener('submit',e=>{
+    e.preventDefault(); err.textContent='';
+    const res=r.read(); if(typeof res==='string'){ err.textContent=res; return; }
+    S.view={name:'home'}; if(location.hash!=='#/') history.replaceState(null,'','#/');
+    api.insert('settings',{...res, business_name:name.value.trim()});
+  });
+  v.appendChild(h('div',{class:'settings-page first-run-page'},form)); name.focus();
 }
 
 // ---------- data (Supabase) ----------
@@ -1595,6 +1662,7 @@ async function load(quiet){
   const next = TABLES.map((t,i)=>res[i].error?[]:res[i].data);
   if(quiet && S.ready && TABLES.every((t,i)=>JSON.stringify(next[i])===JSON.stringify(S.raw[t]))) return;
   TABLES.forEach((t,i)=>setRaw(t,next[i]));
+  S.settingsLoaded=!res[TABLES.indexOf('settings')].error; // a missing settings table never shows the first-run screen
   S.ready=true; S.error=''; render();
 }
 // S.raw holds the rows as the database has them; S.clients, S.projects… are those rows turned into what the screens use.
@@ -1679,7 +1747,7 @@ if(!sb){
     S.authReady=true; S.session=session;
     if(event==='PASSWORD_RECOVERY') setTimeout(openNewPasswordSheet,0);
     if(session){ if(event!=='TOKEN_REFRESHED') setTimeout(load,0); }
-    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.tasks=[]; S.time_entries=[]; S.raw={}; S.ready=false; closeSheet(); render(); }
+    else { S.clients=[]; S.projects=[]; S.txns=[]; S.milestones=[]; S.invoices=[]; S.settings=[]; S.services=[]; S.tasks=[]; S.time_entries=[]; S.raw={}; S.ready=false; S.settingsLoaded=false; closeSheet(); render(); }
   });
 }
 })();

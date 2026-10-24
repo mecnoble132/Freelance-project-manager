@@ -28,9 +28,10 @@ test.after(async () => { if (browser) await browser.close(); });
 
 // Opens the site on a fresh page. Returns the page and the list of browser errors seen.
 // timezone / locale are the browser's; `settings` changes the owner's settings row (what the app itself uses, so the two can differ);
+// `invited` is the sign-up allow-list, `autoConfirm` signs a new account straight in, `notInvitedMessage` is what a refused sign-up says;
 // `usd` adds a dollar client, project, payments, invoice and renewal; `empty` starts with no data; `prepare(store)` changes the data before the page loads.
 async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280, height: 900 }, colorScheme = 'light', period, now = '2026-10-23T12:00:00+05:30', missing = [],
-  timezone = 'Asia/Kolkata', locale = 'en-IN', settings, usd = false, empty = false, prepare } = {}) {
+  timezone = 'Asia/Kolkata', locale = 'en-IN', settings, usd = false, empty = false, prepare, invited = [], autoConfirm = false, notInvitedMessage } = {}) {
   const context = await browser.newContext({ viewport, colorScheme, timezoneId: timezone, locale });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -46,7 +47,7 @@ async function open(t, { signedIn = true, hash = '#/', viewport = { width: 1280,
   await page.addInitScript(init => {
     window.__LEDGER_TEST__ = init;
     if (init.period) localStorage.setItem('ledger.period', init.period);
-  }, { schema: parse(), rows: store.rows, users: USERS, signedIn, period });
+  }, { schema: parse(), rows: store.rows, users: USERS, signedIn, period, invited, autoConfirm, notInvitedMessage });
   await page.route('**/*', route => {
     const url = route.request().url();
     if (url.startsWith('https://cdn.jsdelivr.net/npm/@supabase/')) return route.fulfill({ contentType: 'text/javascript', body: FAKE_JS });
@@ -1307,3 +1308,116 @@ test('a reminder for a dollar invoice is in dollars and doesn\'t mention UPI', a
   const rem = await page.goto(SITE + '#/invoice/' + ids.invDesign).then(() => page.click('#view button:has-text("Remind")')).then(() => page.inputValue('#r-text'));
   assert.match(rem, /₹15,000/); assert.match(rem, /UPI to mec@okhdfcbank/);
 });
+
+// ---------- sign-up (invite only) and the first-run screen ----------
+
+test('create an account with an invited email: check your email, then back to sign in', async t => {
+  const page = await open(t, { signedIn: false, invited: ['new@example.com'] });
+  await page.click('#l-switch');
+  assert.equal(await page.getAttribute('#l-pass', 'autocomplete'), 'new-password');
+  await page.fill('#l-email', 'New@Example.com'); // the allow-list ignores letter case
+  await page.fill('#l-pass', 'short');
+  await page.click('form.login button[type=submit]');
+  await page.waitForSelector('text=Use at least 8 characters for your password.');
+  await page.fill('#l-pass', 'a good password');
+  await page.click('form.login button[type=submit]');
+  await heading(page).filter({ hasText: 'Check your email' }).waitFor();
+  await page.waitForSelector('text=New@Example.com');
+  assert.deepEqual((await page.evaluate(() => window.__calls)).at(-1), ['signUp', 'New@Example.com', SITE]);
+  assert.equal(await page.locator('#tabs').isHidden(), true);
+  await page.click('button:has-text("Back to sign in")');
+  assert.equal(await page.inputValue('#l-email'), 'New@Example.com');
+  assert.equal(await page.locator('form.login button[type=submit]').textContent(), 'Sign in');
+});
+
+for (const message of ['Database error saving new user', 'This email has not been invited yet.']) {
+  test('an email that isn\'t invited is told so (' + message + ')', async t => {
+    const page = await open(t, { signedIn: false, invited: ['someone@example.com'], notInvitedMessage: message });
+    await page.click('#l-switch');
+    await page.fill('#l-email', 'stranger@example.com');
+    await page.fill('#l-pass', 'a good password');
+    await page.click('form.login button[type=submit]');
+    await page.waitForSelector('text=This email hasn’t been invited yet.');
+    assert.equal(await page.locator('#l-email').count(), 1); // still on the form, nothing created
+  });
+}
+
+test('the sign-in form still signs in, and switching modes keeps the email', async t => {
+  const page = await open(t, { signedIn: false });
+  await page.fill('#l-email', 'me@example.com');
+  await page.click('#l-switch');
+  assert.equal(await page.inputValue('#l-email'), 'me@example.com');
+  assert.equal(await page.locator('text=Forgot password?').count(), 0);
+  assert.equal(await page.locator('form.login button[type=submit]').textContent(), 'Create account');
+  await page.click('#l-switch');
+  await page.fill('#l-pass', 'right password');
+  await page.click('form.login button[type=submit]');
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor(); // the owner has settings and data: no first-run screen
+});
+
+test('a brand-new account sees the first-run screen, and Start saves their settings', async t => {
+  const page = await open(t, { signedIn: false, invited: ['new@example.com'], autoConfirm: true, timezone: 'America/New_York', locale: 'en-US' });
+  await page.click('#l-switch');
+  await page.fill('#l-email', 'new@example.com');
+  await page.fill('#l-pass', 'a good password');
+  await page.click('form.login button[type=submit]');
+  await heading(page).filter({ hasText: 'Welcome to Client Ledger' }).waitFor();
+  assert.equal(await page.locator('#tabs').isHidden(), true);
+  assert.equal(await page.locator('#settings-link').isHidden(), true);
+  assert.equal(await page.inputValue('#s-tz'), 'America/New_York'); // from the browser
+  assert.equal(await page.inputValue('#s-currency'), 'INR');
+  await page.selectOption('#s-currency', 'USD');
+  assert.equal(await page.inputValue('#s-locale'), 'en-US'); // follows the currency
+  await page.selectOption('#s-fy', '1');
+  await page.waitForSelector('text=Your financial year is the calendar year');
+  await page.fill('#s-tz', 'Mars/Olympus');
+  await page.click('button:has-text("Start")');
+  await page.waitForSelector('text=That time zone isn’t recognised.');
+  await page.fill('#s-tz', 'America/New_York');
+  await page.fill('#s-name', 'Dana Builds Sites');
+  await page.click('button:has-text("Start")');
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await page.locator('#tabs').isHidden(), false);
+  assert.equal(await page.locator('.pills button[aria-pressed="true"]').first().textContent(), 'FY 2026');
+  const uid = '00000000-0000-4000-8000-000000000011'; // the fake's id for the second user
+  await page.waitForFunction(id => window.__store.rows.settings.some(r => r.user_id === id), uid); // saved in the background
+  const mine = (await rows(page, 'settings')).filter(r => r.user_id === uid);
+  assert.equal(mine.length, 1);
+  assert.deepEqual([mine[0].business_name, mine[0].default_currency, mine[0].fy_start_month, mine[0].timezone, mine[0].locale], ['Dana Builds Sites', 'USD', 1, 'America/New_York', 'en-US']);
+  // the owner's settings are untouched
+  assert.equal((await rows(page, 'settings')).filter(r => r.user_id === OWNER)[0].business_name, 'Mec Web Studio');
+});
+
+test('a user who already has settings skips the first-run screen, even with no data', async t => {
+  const page = await open(t, { empty: true, settings: { business_name: 'Already set up' } });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await page.locator('text=Welcome to Client Ledger').count(), 0);
+});
+
+test('an empty ledger without settings gets the first-run screen on any page; without a settings table it does not', async t => {
+  const first = await open(t, { empty: true, hash: '#/projects' });
+  await heading(first).filter({ hasText: 'Welcome to Client Ledger' }).waitFor();
+  await first.click('button:has-text("Start")'); // the defaults are fine
+  await heading(first).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.equal(await first.evaluate(() => location.hash), '#/');
+  const old = await open(t, { empty: true, missing: ['settings'] });
+  await heading(old).filter({ hasText: 'Dashboard' }).waitFor();
+});
+
+for (const colorScheme of ['light', 'dark']) {
+  test('sign-up and first-run fit a phone screen (' + colorScheme + ')', async t => {
+    const page = await open(t, { signedIn: false, invited: ['new@example.com'], autoConfirm: true, viewport: { width: 375, height: 800 }, colorScheme });
+    await page.click('#l-switch');
+    const fits = async () => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the page scrolls sideways');
+    await fits();
+    await page.fill('#l-email', 'new@example.com');
+    await page.fill('#l-pass', 'a good password');
+    await page.click('form.login button[type=submit]');
+    await heading(page).filter({ hasText: 'Welcome' }).waitFor();
+    assert.equal(await page.inputValue('#s-tz'), 'Asia/Kolkata'); // not the old name Asia/Calcutta some browsers report
+    await fits();
+    for (const id of ['s-name', 's-currency', 's-fy', 's-tz', 's-locale']) { const b = await page.locator('#' + id).boundingBox(); assert.ok(b.x >= 0 && b.x + b.width <= 375, id + ' is wider than the phone'); }
+    const { bg, fg } = await page.evaluate(() => ({ bg: getComputedStyle(document.body).backgroundColor, fg: getComputedStyle(document.querySelector('.first-run h1')).color }));
+    assert.notEqual(bg, fg);
+  });
+}
