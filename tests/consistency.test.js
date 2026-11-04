@@ -116,13 +116,35 @@ test('schema.sql can be run again safely and only adds things', () => {
     if (/^create (unique )?index/i.test(s)) assert.match(s, /if not exists/i, s);
     if (/add column/i.test(s)) assert.match(s, /add column if not exists/i, s);
     let m;
-    if ((m = /^drop trigger/i.exec(s))) assert.match(s, /^drop trigger if exists require_invited_email on auth\.users$/i, 'the sign-up gate is the only trigger that may be dropped and re-created: ' + s);
-    if ((m = /^create trigger/i.exec(s))) assert.match(s, /^create trigger require_invited_email before insert on auth\.users for each row execute function public\.require_invited_email\(\)$/i, s);
+    // The sign-up gate and the same-owner checks are the only triggers, dropped and re-created so the file can run again.
+    if ((m = /^drop trigger/i.exec(s))) assert.match(s, /^drop trigger if exists (require_invited_email on auth\.users|same_owner on public\.[a-z_]+)$/i, 'only the sign-up gate and same_owner triggers may be dropped and re-created: ' + s);
+    if ((m = /^create trigger/i.exec(s))) assert.match(s, /^create trigger (require_invited_email before insert on auth\.users for each row execute function public\.require_invited_email\(\)|same_owner before insert or update on public\.[a-z_]+ for each row execute function public\.same_owner\([^)]*\))$/i, s);
     if ((m = /^drop policy if exists "([^"]+)" on (\S+)/i.exec(s))) dropped.policy.add(m[2] + ' ' + m[1]);
     if ((m = /^create policy "([^"]+)" on (\S+)/i.exec(s))) assert.ok(dropped.policy.has(m[2] + ' ' + m[1]), 'drop policy if exists must come before: ' + s);
     if ((m = /drop constraint if exists (\S+)/i.exec(s))) dropped.constraint.add(m[1]);
     if ((m = /add constraint (\S+)/i.exec(s))) assert.ok(dropped.constraint.has(m[1]), 'drop constraint if exists must come before: ' + s);
   }
+});
+
+test('a row can only point at rows in the same ledger: every foreign key between ledger tables has a same_owner check', () => {
+  const triggers = {};
+  for (const [, table, args] of SQL.matchAll(/create trigger same_owner before insert or update on public\.([a-z_]+)\s+for each row execute function public\.same_owner\(([^)]*)\)/g)) {
+    const a = [...args.matchAll(/'([a-z_]+)'/g)].map(x => x[1]);
+    triggers[table] = Object.fromEntries(a.flatMap((x, i) => i % 2 ? [] : [[x, a[i + 1]]]));
+    assert.match(SQL, new RegExp('drop trigger if exists same_owner on public\\.' + table + ';'), table + ': drop the trigger before creating it, so the file runs again');
+  }
+  const fks = [];
+  for (const [t, def] of Object.entries(schema)) for (const [col, c] of Object.entries(def.columns)) {
+    if (!c.references || t === 'activity_log' || c.references.table === 'users') continue;
+    fks.push(t + '.' + col + ' -> ' + c.references.table);
+    assert.equal((triggers[t] || {})[col], c.references.table, t + '.' + col + ' references ' + c.references.table + ', so it must be in the same_owner trigger on ' + t);
+  }
+  assert.deepEqual(Object.entries(triggers).flatMap(([t, cols]) => Object.entries(cols).map(([c, r]) => t + '.' + c + ' -> ' + r)).sort(), fks.sort(), 'the same_owner triggers list a column that isn\'t a foreign key');
+  const fn = /create or replace function public\.same_owner\(\)([\s\S]*?)\$\$([\s\S]*?)\$\$;/.exec(SQL);
+  assert.ok(fn, 'the same_owner function is missing');
+  assert.match(fn[1], /returns trigger\s+language plpgsql security definer set search_path = public/, 'security definer (to see the other row) with a fixed search_path');
+  assert.match(fn[2], /owner <> new\.user_id/);
+  assert.match(SQL, /revoke execute on function public\.same_owner\(\) from public, anon, authenticated/);
 });
 
 test('every table has row-level security and an own-rows policy', () => {

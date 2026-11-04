@@ -317,3 +317,51 @@ create trigger require_invited_email before insert on auth.users
 alter table public.settings add column if not exists business_type text not null default 'web_dev';
 alter table public.settings drop constraint if exists settings_business_type_check;
 alter table public.settings add constraint settings_business_type_check check (business_type in ('web_dev', 'products', 'general'));
+
+-- One person's rows can only point at their own rows (family plan, step 5). Row-level security checks a row's own
+-- user_id, but a foreign key on its own would accept the id of someone else's client, project, invoice or milestone.
+-- This trigger refuses that. It is security definer so it can see the row being pointed at (row-level security would
+-- hide it), and its arguments are (column, table) pairs. Every foreign key between ledger tables is listed here;
+-- tests/consistency.test.js checks that none is missing.
+create or replace function public.same_owner() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  i integer := 0;
+  ref uuid;
+  owner uuid;
+begin
+  while i < tg_nargs loop
+    ref := (to_jsonb(new) ->> tg_argv[i])::uuid;
+    if ref is not null then
+      owner := null;
+      execute format('select user_id from public.%I where id = $1', tg_argv[i + 1]) into owner using ref;
+      if owner is not null and owner <> new.user_id then
+        raise exception '%.% points at a row in someone else''s ledger.', tg_table_name, tg_argv[i] using errcode = '42501';
+      end if;
+    end if;
+    i := i + 2;
+  end loop;
+  return new;
+end $$;
+revoke execute on function public.same_owner() from public, anon, authenticated;
+drop trigger if exists same_owner on public.projects;
+create trigger same_owner before insert or update on public.projects
+  for each row execute function public.same_owner('client_id', 'clients');
+drop trigger if exists same_owner on public.txns;
+create trigger same_owner before insert or update on public.txns
+  for each row execute function public.same_owner('client_id', 'clients', 'project_id', 'projects', 'invoice_id', 'invoices');
+drop trigger if exists same_owner on public.milestones;
+create trigger same_owner before insert or update on public.milestones
+  for each row execute function public.same_owner('project_id', 'projects');
+drop trigger if exists same_owner on public.invoices;
+create trigger same_owner before insert or update on public.invoices
+  for each row execute function public.same_owner('client_id', 'clients', 'project_id', 'projects', 'milestone_id', 'milestones');
+drop trigger if exists same_owner on public.services;
+create trigger same_owner before insert or update on public.services
+  for each row execute function public.same_owner('client_id', 'clients', 'project_id', 'projects');
+drop trigger if exists same_owner on public.tasks;
+create trigger same_owner before insert or update on public.tasks
+  for each row execute function public.same_owner('project_id', 'projects');
+drop trigger if exists same_owner on public.time_entries;
+create trigger same_owner before insert or update on public.time_entries
+  for each row execute function public.same_owner('project_id', 'projects');
