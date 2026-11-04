@@ -1,8 +1,40 @@
 // Loads one user's ledger and works out the same numbers the dashboard shows.
 
-const STATUS_LABELS = { lead: 'Lead', active: 'In progress', paused: 'On hold', done: 'Done' };
+// Kinds of business. Each person picks one in their settings (business_type); it changes the words, status labels,
+// expense categories and which web-only parts are shown, never the data. Keep identical to BUSINESS_TYPES in index.html
+// (tests/consistency.test.js compares them) and the keys to settings_business_type_check in supabase/schema.sql.
+const BUSINESS_TYPES = {
+  web_dev: {
+    label: 'Web development', help: 'Websites and web apps for clients, with project links and domain and hosting renewals.',
+    project: ['project', 'projects'], client: ['client', 'clients'],
+    statuses: { lead: 'Lead', active: 'In progress', paused: 'On hold', done: 'Done' },
+    dates: { start: 'Start date', due: 'Due date', quoted: 'Quoted' },
+    links: true, renewals: true,
+    categories: ['Domain', 'Hosting', 'Software & plugins', 'Design assets', 'Contractor', 'Ads & marketing', 'Travel', 'Other']
+  },
+  products: {
+    label: 'Products made to order', help: 'Things you make and sell, like custom gift boxes, cakes or crafts.',
+    project: ['order', 'orders'], client: ['customer', 'customers'],
+    statuses: { lead: 'Enquiry', active: 'Making', paused: 'On hold', done: 'Delivered' },
+    dates: { start: 'Order date', due: 'Delivery date', quoted: 'Price' },
+    links: false, renewals: false,
+    categories: ['Materials & packaging', 'Products & stock', 'Printing & labels', 'Shipping & delivery', 'Platform & payment fees', 'Ads & marketing', 'Travel', 'Other']
+  },
+  general: {
+    label: 'Other services', help: 'Any other work for clients, like design, photography, tuition or consulting.',
+    project: ['job', 'jobs'], client: ['client', 'clients'],
+    statuses: { lead: 'Enquiry', active: 'In progress', paused: 'On hold', done: 'Done' },
+    dates: { start: 'Start date', due: 'Due date', quoted: 'Quoted' },
+    links: false, renewals: false,
+    categories: ['Equipment', 'Software & subscriptions', 'Materials', 'Contractor', 'Ads & marketing', 'Travel', 'Other']
+  }
+};
+const businessType = k => BUSINESS_TYPES[k] ? k : 'web_dev'; // no setting (or an unknown one) is the owner's web development
+const STATUS_LABELS = BUSINESS_TYPES.web_dev.statuses;
 const STATUSES = Object.keys(STATUS_LABELS);
-const CATEGORIES = ['Domain', 'Hosting', 'Software & plugins', 'Design assets', 'Contractor', 'Ads & marketing', 'Travel', 'Other'];
+const CATEGORIES = BUSINESS_TYPES.web_dev.categories;
+// Every category any kind of business can use, for the tool schemas; each person is held to their own list (Ledger.categories()).
+const ALL_CATEGORIES = [...new Set(Object.values(BUSINESS_TYPES).flatMap(b => b.categories))];
 // The fixed list of currencies. Keep identical to the check constraints in supabase/schema.sql and to CURRENCIES in index.html.
 const CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'AED', 'NZD', 'CHF', 'JPY', 'ZAR'];
 const LOCALES = ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'];
@@ -10,7 +42,7 @@ const LOCALES = ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'];
 const DEFAULTS = { currency: 'INR', fyStartMonth: 4, timezone: 'Asia/Kolkata', locale: 'en-IN' };
 const PERIODS = ['this_month', 'last_month', 'last_12_months', 'this_fy', 'last_fy', 'this_year', 'last_year', 'all_time'];
 
-const guessCategory = note => CATEGORIES.find(c => c.toLowerCase() === String(note || '').trim().toLowerCase()) || 'Other';
+const guessCategory = (note, list = CATEGORIES) => list.find(c => c.toLowerCase() === String(note || '').trim().toLowerCase()) || 'Other';
 const round = n => Math.round(n * 100) / 100;
 const curOf = r => CURRENCIES.includes(r.currency) ? r.currency : DEFAULTS.currency; // rows from before currencies existed are rupees
 const pad = n => String(n).padStart(2, '0');
@@ -95,6 +127,7 @@ async function load(db) {
 class Ledger {
   constructor(clients, projects, txns, milestones = [], invoices = [], settings = [], services = [], tasks = [], timeEntries = []) {
     this.raw = { clients, projects, txns, milestones, invoices, settings, services, tasks, time_entries: timeEntries };
+    const st = settings[0] || {}, kind = BUSINESS_TYPES[businessType(st.business_type)];
     this.tasks = tasks.map(r => ({ id: r.id, projectId: r.project_id, title: r.title || '', done: !!r.done, dueDate: r.due_date || null, order: r.sort_order ?? 0, doneAt: r.done_at || null, createdAt: r.created_at || '' }));
     this.timeEntries = timeEntries.map(r => ({ id: r.id, projectId: r.project_id, date: r.date || null, minutes: Number(r.minutes) || 0, note: r.note || '' }));
     this.services = services.map(r => ({ id: r.id, clientId: r.client_id, projectId: r.project_id || null, currency: curOf(r), kind: r.kind || 'other', name: r.name || '', provider: r.provider || '',
@@ -107,24 +140,27 @@ class Ledger {
     }));
     this.txns = txns.map(r => ({
       id: r.id, clientId: r.client_id, projectId: r.project_id, currency: curOf(r), type: r.type, amount: Number(r.amount) || 0,
-      category: r.type === 'out' ? (r.category || guessCategory(r.note)) : '', note: r.note || '', date: r.date || null, invoiceId: r.invoice_id || null
+      category: r.type === 'out' ? (r.category || guessCategory(r.note, kind.categories)) : '', note: r.note || '', date: r.date || null, invoiceId: r.invoice_id || null
     }));
     this.invoices = invoices.map(r => ({
       id: r.id, clientId: r.client_id, projectId: r.project_id || null, currency: curOf(r), milestoneId: r.milestone_id || null, number: r.number, issueDate: r.issue_date, dueDate: r.due_date || null,
       items: (Array.isArray(r.items) ? r.items : []).map(i => ({ description: i.description || '', quantity: Number(i.quantity) || 0, rate: Number(i.rate) || 0 })),
       total: Number(r.total) || 0, status: r.status || 'draft', notes: r.notes || '', sentAt: r.sent_at || null, lastReminded: r.last_reminded || null, reminderCount: r.reminder_count || 0
     }));
-    const st = settings[0] || {};
     this.settings = { businessName: st.business_name || '', address: st.address || '', phone: st.phone || '', email: st.email || '', upiId: st.upi_id || '',
       bankDetails: st.bank_details || '', invoicePrefix: st.invoice_prefix || 'INV', paymentTermsDays: st.payment_terms_days ?? 7, invoiceNotes: st.invoice_notes || '',
       defaultCurrency: CURRENCIES.includes(st.default_currency) ? st.default_currency : DEFAULTS.currency,
       fyStartMonth: st.fy_start_month >= 1 && st.fy_start_month <= 12 ? st.fy_start_month : DEFAULTS.fyStartMonth,
-      timezone: validTimezone(st.timezone), locale: LOCALES.includes(st.locale) ? st.locale : DEFAULTS.locale };
+      timezone: validTimezone(st.timezone), locale: LOCALES.includes(st.locale) ? st.locale : DEFAULTS.locale, businessType: businessType(st.business_type) };
     this.milestoneRows = milestones.map(r => ({ id: r.id, projectId: r.project_id, name: r.name || '', amount: Number(r.amount) || 0, dueDate: r.due_date || null, order: r.sort_order ?? 0, createdAt: r.created_at || '' }));
   }
   today() { return todayIn(this.settings.timezone); }
   regional() { return { timezone: this.settings.timezone, fyStartMonth: this.settings.fyStartMonth }; }
   period(period, from, to) { return periodRange(period, from, to, this.regional()); }
+  // The person's kind of business: its words, status labels and expense categories.
+  kind() { return BUSINESS_TYPES[this.settings.businessType]; }
+  statusLabel(s) { return this.kind().statuses[s] || s; }
+  categories() { return this.kind().categories; }
   fmt(amount, currency) { return formatMoney(amount, currency || this.cur || this.settings.defaultCurrency, this.settings.locale); }
 
   // ---------- currencies ----------
@@ -235,7 +271,7 @@ class Ledger {
   projectSummary(p) {
     const ms = this.milestones(p);
     return {
-      id: p.id, title: p.title, client: this.clientName(p.clientId), clientId: p.clientId, currency: p.currency, status: STATUS_LABELS[p.status] || p.status,
+      id: p.id, title: p.title, client: this.clientName(p.clientId), clientId: p.clientId, currency: p.currency, status: this.statusLabel(p.status),
       description: p.description || null,
       links: { preview: p.previewUrl || null, live: p.liveUrl || null, github: p.githubUrl || null },
       startDate: p.startDate, dueDate: p.dueDate, overdue: !!(p.dueDate && p.status !== 'done' && p.dueDate < this.today()),
@@ -333,7 +369,7 @@ class Ledger {
     const projectProfit = this.projects.map(p => ({ project: p.title, client: this.clientName(p.clientId), ...sumOf(tx.filter(t => t.projectId === p.id)) }))
       .filter(x => x.revenue || x.spending).sort((a, b) => b.profit - a.profit);
     const owed = this.owed();
-    const counts = {}; this.projects.forEach(p => { const l = STATUS_LABELS[p.status] || p.status; counts[l] = (counts[l] || 0) + 1; });
+    const counts = {}; this.projects.forEach(p => { const l = this.statusLabel(p.status); counts[l] = (counts[l] || 0) + 1; });
     const undated = this.txns.filter(t => !t.date).length;
     const ms = this.milestoneAlerts();
     return {
@@ -354,7 +390,7 @@ class Ledger {
   owed() {
     return this.projects.map(p => ({ p, s: this.projectStats(p) })).filter(x => x.s.stillToCollect > 0)
       .sort((a, b) => b.s.stillToCollect - a.s.stillToCollect)
-      .map(({ p, s }) => ({ projectId: p.id, project: p.title, client: this.clientName(p.clientId), currency: p.currency, status: STATUS_LABELS[p.status], quoted: s.quoted, received: s.received, stillToCollect: s.stillToCollect }));
+      .map(({ p, s }) => ({ projectId: p.id, project: p.title, client: this.clientName(p.clientId), currency: p.currency, status: this.statusLabel(p.status), quoted: s.quoted, received: s.received, stillToCollect: s.stillToCollect }));
   }
 
   comparePeriods(args = {}) { return this.inCurrency(args, L => L.comparePeriodsBody(args)); }
@@ -482,7 +518,7 @@ class Ledger {
     const lastPaid = p => this.txns.filter(x => x.projectId === p.id && x.type !== 'out' && x.date).map(x => x.date).sort().pop() || null;
     return {
       ...this.currencyTag(), today: t,
-      overdueProjects: open.filter(p => p.dueDate && p.dueDate < t).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate, status: STATUS_LABELS[p.status] })),
+      overdueProjects: open.filter(p => p.dueDate && p.dueDate < t).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate, status: this.statusLabel(p.status) })),
       dueWithinAWeek: open.filter(p => p.dueDate && p.dueDate >= t && p.dueDate <= soon).map(p => ({ id: p.id, project: this.projectLabel(p), dueDate: p.dueDate })),
       overdueMilestones: ms.overdue, milestonesDueWithinAWeek: ms.dueWithinAWeek,
       overdueTasks: this.taskAlerts().overdue, tasksDueWithinAWeek: this.taskAlerts().dueWithinAWeek,
@@ -507,14 +543,14 @@ class Ledger {
       ...this.currencyTag(), query,
       clients: this.clients.filter(c => has(c.name) || has(c.contact) || has(c.notes)).map(c => ({ id: c.id, name: c.name, contact: c.contact || null })),
       projects: this.projects.filter(p => has(p.title) || has(p.description) || has(p.previewUrl) || has(p.liveUrl) || has(p.githubUrl) || has(this.clientName(p.clientId)))
-        .map(p => ({ id: p.id, title: p.title, client: this.clientName(p.clientId), status: STATUS_LABELS[p.status] })),
+        .map(p => ({ id: p.id, title: p.title, client: this.clientName(p.clientId), status: this.statusLabel(p.status) })),
       transactions: this.txns.filter(t => has(t.note) || has(t.category)).slice(0, 50).map(t => this.txnSummary(t))
     };
   }
 
   listProjects({ status, client, search } = {}) {
     let ps = this.projects;
-    if (status) { const s = String(status).toLowerCase(); ps = ps.filter(p => p.status === s || (STATUS_LABELS[p.status] || '').toLowerCase() === s || (s === 'open' && p.status !== 'done')); }
+    if (status) { const s = String(status).toLowerCase(); ps = ps.filter(p => p.status === s || this.statusLabel(p.status).toLowerCase() === s || (s === 'open' && p.status !== 'done')); }
     if (client) { const ids = new Set(this.find(this.clients, client, c => c.name).map(c => c.id)); ps = ps.filter(p => ids.has(p.clientId)); }
     if (search) { const q = String(search).toLowerCase(); ps = ps.filter(p => (p.title + ' ' + this.clientName(p.clientId) + ' ' + p.description).toLowerCase().includes(q)); }
     return { ...this.currencyTag(), count: ps.length, projects: ps.map(p => this.projectSummary(p)) };
@@ -612,5 +648,5 @@ class Ledger {
   }
 }
 
-module.exports = { load, Ledger, PERIODS, CATEGORIES, STATUSES, STATUS_LABELS, CURRENCIES, LOCALES, DEFAULTS, todayIn, validTimezone, formatMoney, fyStartYear, fyLabel, fyRange, fyOf, periodRange, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber,
+module.exports = { load, Ledger, PERIODS, CATEGORIES, ALL_CATEGORIES, BUSINESS_TYPES, businessType, STATUSES, STATUS_LABELS, CURRENCIES, LOCALES, DEFAULTS, todayIn, validTimezone, formatMoney, fyStartYear, fyLabel, fyRange, fyOf, periodRange, guessCategory, round, nextInvoiceNumber, addDays, whatsappNumber,
   addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY };

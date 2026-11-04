@@ -1,7 +1,7 @@
 // Changes made through the MCP server. Each tool call is one "change": every row it inserts, updates or deletes
 // is recorded in activity_log under one batch id, so the whole call can be listed and undone.
 const crypto = require('crypto');
-const { load, Ledger, CATEGORIES, STATUSES, CURRENCIES, LOCALES, validTimezone, guessCategory, round, nextInvoiceNumber, addDays, addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY } = require('./ledger');
+const { load, Ledger, BUSINESS_TYPES, STATUSES, CURRENCIES, LOCALES, validTimezone, guessCategory, round, nextInvoiceNumber, addDays, addMonths, niceDate, CYCLE_MONTHS, SERVICE_KINDS, KIND_CATEGORY } = require('./ledger');
 
 class Invalid extends Error {}
 const fail = msg => { throw new Invalid(msg); };
@@ -31,14 +31,20 @@ function url(v, label) {
 function status(v) {
   const s = text(v).toLowerCase().replace(/[\s-]+/g, '_');
   const map = { in_progress: 'active', on_hold: 'paused', completed: 'done', finished: 'done' };
+  // Every kind of business's own labels work too ("Enquiry", "Making", "Delivered").
+  for (const b of Object.values(BUSINESS_TYPES)) for (const [k, l] of Object.entries(b.statuses)) { const key = l.toLowerCase().replace(/[\s-]+/g, '_'); if (!map[key]) map[key] = k; }
   const r = map[s] || s;
   if (!STATUSES.includes(r)) fail('Status must be one of: lead, active (in progress), paused (on hold), done.');
   return r;
 }
-function category(v, note) {
-  if (v == null || v === '') return guessCategory(note);
-  const c = CATEGORIES.find(x => x.toLowerCase() === String(v).trim().toLowerCase());
-  if (!c) fail('Category must be one of: ' + CATEGORIES.join(', ') + '.');
+// Expense categories are the person's own kind of business's list. An entry can keep a category it already has
+// (from before they changed their kind of business, say), but nothing new outside the list is accepted.
+function category(v, note, L, keep) {
+  const list = L.categories();
+  if (v == null || v === '') return guessCategory(note, list);
+  const want = String(v).trim().toLowerCase();
+  const c = list.find(x => x.toLowerCase() === want) || (keep && keep.toLowerCase() === want ? keep : null);
+  if (!c) fail('Category must be one of: ' + list.join(', ') + '.');
   return c;
 }
 function currency(v, label = 'Currency') {
@@ -246,7 +252,7 @@ function entryRow(L, e, i) {
   const proj = place.project_id && L.project(place.project_id), want = e.currency == null || e.currency === '' ? null : currency(e.currency, where + 'Currency'), have = inv ? inv.currency : proj ? proj.currency : null;
   if (have && want && want !== have) fail(where + (inv ? inv.number : 'That project') + ' is in ' + have + '; this ' + (type === 'in' ? 'payment' : 'expense') + ' is in ' + want + '. Money has to be in the same currency as its ' + (inv ? 'invoice' : 'project') + '.');
   return { row: { client_id: place.client_id, project_id: place.project_id, type, amount: money(e.amount, { label: where + 'Amount' }), currency: have || want || L.settings.defaultCurrency,
-    category: type === 'out' ? category(e.category, note) : '', note, date: e.date === undefined ? L.today() : date(e.date, where + 'Date'), ...(inv ? { invoice_id: inv.id } : {}) }, label: place.label };
+    category: type === 'out' ? category(e.category, note, L) : '', note, date: e.date === undefined ? L.today() : date(e.date, where + 'Date'), ...(inv ? { invoice_id: inv.id } : {}) }, label: place.label };
 }
 
 async function addTransactions(db, entries, summaryWord) {
@@ -276,7 +282,7 @@ async function updateTransaction(db, a) {
   if (given(a.date)) patch.date = date(a.date, 'Date');
   if (given(a.note)) patch.note = text(a.note, 500);
   const type = patch.type || before.type;
-  if (given(a.category) || given(a.type)) patch.category = type === 'out' ? category(a.category ?? before.category, patch.note ?? before.note) : '';
+  if (given(a.category) || given(a.type)) patch.category = type === 'out' ? category(a.category ?? before.category, patch.note ?? before.note, L, before.category) : '';
   if (given(a.invoice)) {
     if (!a.invoice) patch.invoice_id = null;
     else { const r = L.resolveInvoice(a.invoice); if (r.error) return r; if (r.invoice.status === 'cancelled') return { error: r.invoice.number + ' is cancelled.' };
@@ -368,7 +374,12 @@ async function updateSettings(db, a) {
   if (given(a.fy_start_month)) { const n = Number(a.fy_start_month); if (!Number.isInteger(n) || n < 1 || n > 12) fail('The financial year start month must be a whole number from 1 (January) to 12 (December).'); patch.fy_start_month = n; }
   if (given(a.timezone)) { patch.timezone = text(a.timezone, 100); if (validTimezone(patch.timezone) !== patch.timezone || !patch.timezone) fail('That time zone isn\'t recognised. Use a name like Asia/Kolkata, Europe/London or America/New_York.'); }
   if (given(a.locale)) { patch.locale = text(a.locale, 10); if (!LOCALES.includes(patch.locale)) fail('locale must be one of: ' + LOCALES.join(', ') + '.'); }
-  if (!Object.keys(patch).length) fail('Say what to change: ' + Object.keys(SETTING_FIELDS).join(', ') + ', payment_terms_days, default_currency, fy_start_month, timezone or locale.');
+  if (given(a.business_type)) {
+    const want = text(a.business_type, 100).toLowerCase(), hit = Object.entries(BUSINESS_TYPES).find(([k, b]) => k === want || b.label.toLowerCase() === want);
+    if (!hit) fail('business_type must be one of: ' + Object.entries(BUSINESS_TYPES).map(([k, b]) => k + ' (' + b.label.toLowerCase() + ')').join(', ') + '.');
+    patch.business_type = hit[0];
+  }
+  if (!Object.keys(patch).length) fail('Say what to change: ' + Object.keys(SETTING_FIELDS).join(', ') + ', payment_terms_days, business_type, default_currency, fy_start_month, timezone or locale.');
   const ch = new Change(db, 'Edited business details'); await ch.ready();
   if (before) await ch.update('settings', before, patch); else await ch.insert('settings', patch);
   const now = await load(db);

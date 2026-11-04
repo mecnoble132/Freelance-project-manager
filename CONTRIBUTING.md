@@ -50,7 +50,7 @@ Notes for the unfinished parts:
 - Match the existing code: `h()` builds elements, `sheet()` opens forms, `api.insert/update/del` show the change on screen at once and save in the background, in order (a failed save reverts and shows a message). A new table that other rows point at must also go in `ON_DELETE` in `index.html` (a test checks it against `schema.sql`). Short comments, plain-words labels.
 - New pages: add the name to `parseHash()` and a `render…` function to the map in `render()`. Add at most one new tab (Invoices).
 - New tables go in `TABLES` and `map`. If a table is missing, load it as an empty list, never break the app.
-- Project statuses are listed in five places: `STATUSES` here, `ledger.js`, `statusIn` in `tools.js`, `status()` in `writes.js`, and the `projects_status_check` constraint. Expense categories are listed in two: here and in `ledger.js`. Change every copy together.
+- Project statuses are listed in five places: `STATUSES` here, `ledger.js`, `statusIn` in `tools.js`, `status()` in `writes.js`, and the `projects_status_check` constraint. Expense categories are listed in two: here and in `ledger.js`. The kinds of business (`BUSINESS_TYPES`: words, status labels, date labels, categories, links, renewals) are written out in full in two places, here and in `ledger.js`, and their keys are also in `settings_business_type_check`. Every user-facing word for a project or client comes from `words()`, never a hard-coded "project" or "client". Change every copy together.
 - Check new screens at phone width, in light and dark mode.
 
 ### MCP (`api/`)

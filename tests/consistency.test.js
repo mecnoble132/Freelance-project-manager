@@ -30,6 +30,20 @@ test('expense categories match', () => {
   assert.deepEqual(arrayIn(HTML, /const CATEGORIES = \[(.*?)\];/), ledger.CATEGORIES);
 });
 
+test('the kinds of business are the same on the website, the server and in schema.sql (and web development is the default)', () => {
+  const m = /const BUSINESS_TYPES = (\{[\s\S]*?\n\});/.exec(HTML);
+  assert.ok(m, 'couldn\'t find BUSINESS_TYPES in index.html');
+  assert.deepEqual(Function('return ' + m[1])(), ledger.BUSINESS_TYPES, 'index.html BUSINESS_TYPES vs ledger.js');
+  assert.deepEqual(schema.settings.checks.business_type.values, Object.keys(ledger.BUSINESS_TYPES), 'schema.sql settings_business_type_check vs ledger.js');
+  assert.equal(schema.settings.columns.business_type.default.value, 'web_dev', 'existing users must stay web development');
+  assert.ok(schema.settings.columns.business_type.notNull);
+  assert.deepEqual(ledger.BUSINESS_TYPES.web_dev.categories, ledger.CATEGORIES);
+  assert.deepEqual(Object.entries(ledger.BUSINESS_TYPES.web_dev.statuses), arrayIn(HTML, /const STATUSES = \[(.*?)\];\n/), 'web development keeps the STATUSES labels');
+  // the website has form examples for every kind
+  const ex = /const EXAMPLES = (\{[\s\S]*?\n\});/.exec(HTML);
+  assert.deepEqual(Object.keys(Function('return ' + ex[1])()), Object.keys(ledger.BUSINESS_TYPES), 'index.html EXAMPLES needs an entry for every kind of business');
+});
+
 test('every period on the website has a matching MCP period', () => {
   const site = [.../const PERIODS = \[(.*?)\];\n/.exec(HTML)[1].matchAll(/\['([a-z0-9_]+)'/g)].map(m => m[1]);
   const server = { month: 'this_month', '12m': 'last_12_months', this_fy: 'this_fy', last_fy: 'last_fy', year: 'this_year', all: 'all_time' };
