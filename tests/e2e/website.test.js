@@ -1307,3 +1307,137 @@ test('a reminder for a dollar invoice is in dollars and doesn\'t mention UPI', a
   const rem = await page.goto(SITE + '#/invoice/' + ids.invDesign).then(() => page.click('#view button:has-text("Remind")')).then(() => page.inputValue('#r-text'));
   assert.match(rem, /₹15,000/); assert.match(rem, /UPI to mec@okhdfcbank/);
 });
+
+// ---------- kinds of business (family plan, step 4) ----------
+// A gift-box business: the owner's seed ledger with business_type 'products'. Without its renewals unless a test keeps them.
+const giftBox = { business_type: 'products' };
+const noServices = store => { store.rows.services = store.rows.services.filter(r => r.user_id !== OWNER); };
+const withLink = store => store.update('projects', r => r.id === ids.gbSite, { live_url: 'https://geekboz.in/' });
+const tabs = page => page.locator('#tabs a').allTextContents();
+
+test('a gift-box business sees orders and customers, its own statuses and labels, and no web-only parts', async t => {
+  const page = await open(t, { settings: giftBox, prepare: noServices });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.deepEqual(await tabs(page), ['Dashboard', 'Orders', 'Customers', 'Money', 'Invoices']);
+  assert.equal(await page.locator('#view .page-head button').last().textContent(), '+ New order');
+  assert.equal(await page.locator('.kpi').filter({ has: page.locator('.eyebrow', { hasText: /^Orders$/ }) }).locator('.s').textContent(), 'making · 1 enquiry worth ₹80k');
+  assert.deepEqual(await page.locator('#view h2').allTextContents().then(x => x.filter(h => /Renewals|Most profitable/.test(h))), ['Most profitable orders'], 'no Renewals card');
+  // the list of orders
+  await page.click('#tabs a:has-text("Orders")');
+  await heading(page).filter({ hasText: 'Orders' }).waitFor();
+  assert.deepEqual(await page.locator('[aria-label="Status"] button').allTextContents(), ['Open 2', 'All 3', 'Enquiry 1', 'Making 1', 'On hold 0', 'Delivered 1']);
+  assert.equal(await page.getAttribute('.search', 'placeholder'), 'Search orders or customers');
+  await page.click('.view-pills button:has-text("Board")');
+  assert.deepEqual(await page.locator('.bhead h2').allTextContents(), ['Enquiry', 'Making', 'On hold', 'Delivered']);
+  await page.click('.view-pills button:has-text("List")');
+  // one order
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  await page.locator('.back', { hasText: '← All orders' }).waitFor();
+  assert.equal(await kpi(page, 'Price').textContent(), '₹50,000');
+  assert.equal(await page.locator('.kpi').filter({ has: page.locator('.eyebrow', { hasText: /^Received$/ }) }).locator('.s').textContent(), '40% of price');
+  assert.deepEqual(await page.locator('.facts .l').allTextContents(), ['Ordered', 'Delivery', 'Added', 'Currency']);
+  assert.equal(await page.locator('.links').count(), 0, 'no "No preview link" placeholders');
+  assert.match(await page.locator('.card', { has: page.locator('h2', { hasText: 'Payment milestones' }) }).textContent(), /Split the price|Advance/);
+  // its form
+  await page.click('button:has-text("Edit")');
+  const labels = await page.locator('.sheet label').allTextContents();
+  for (const l of ['Order title', 'Customer', 'Status', 'Price', 'Order date', 'Delivery date', 'Description']) assert.ok(labels.includes(l), l + ' missing from ' + labels);
+  assert.equal(await page.locator('#p-previewUrl, #p-liveUrl, #p-githubUrl').count(), 0, 'no web link fields');
+  assert.deepEqual(await page.locator('#p-status option').allTextContents(), ['Enquiry', 'Making', 'On hold', 'Delivered']);
+  assert.equal(await page.locator('.sheet h2').textContent(), 'Edit order');
+  await page.click('.sheet button:has-text("Cancel")');
+  // a customer
+  await page.goto(SITE + '#/client/' + ids.geekboz);
+  await page.locator('.back', { hasText: '← All customers' }).waitFor();
+  assert.deepEqual(await page.locator('.sec-head h2').allTextContents(), ['Orders', 'Money'], 'no Services section');
+  // money: their own expense categories, and the order picker says Order
+  await page.click('button:has-text("+ Add money")');
+  await page.click('.seg .out');
+  assert.deepEqual(await page.locator('#m-cat option').allTextContents(), ['Materials & packaging', 'Products & stock', 'Printing & labels', 'Shipping & delivery', 'Platform & payment fees', 'Ads & marketing', 'Travel', 'Other']);
+  assert.equal(await page.locator('label[for="m-project"]').textContent(), 'Order');
+  assert.equal(await page.locator('label[for="m-client"]').textContent(), 'Customer');
+  assert.equal(await page.getAttribute('#m-note', 'placeholder'), 'e.g. Ribbons and boxes, courier');
+  await page.fill('#m-amount', '350');
+  await page.selectOption('#m-cat', 'Printing & labels');
+  await page.click('.sheet button[type=submit]');
+  await page.waitForFunction(() => window.__store.rows.txns.some(r => r.amount === 350));
+  assert.equal((await rows(page, 'txns')).find(r => r.amount === 350).category, 'Printing & labels');
+});
+
+test('a gift-box business still sees links and renewals it already has, and an old expense keeps its category', async t => {
+  const page = await open(t, { settings: giftBox, prepare: withLink });
+  await heading(page).filter({ hasText: 'Dashboard' }).waitFor();
+  assert.ok((await page.locator('#view h2').allTextContents()).includes('Renewals'), 'renewals show while there are services');
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  await page.locator('.facts').waitFor();
+  assert.deepEqual(await page.locator('.links a').allTextContents(), ['Live site · geekboz.in'], 'only the saved link, no empty ones');
+  // editing the order keeps its link even though the field isn't shown
+  await page.click('button:has-text("Edit")');
+  await page.fill('#p-name', 'Website box');
+  await page.click('.sheet button[type=submit]');
+  await page.waitForFunction(id => window.__store.rows.projects.find(r => r.id === id).name === 'Website box', ids.gbSite);
+  assert.equal((await rows(page, 'projects')).find(r => r.id === ids.gbSite).live_url, 'https://geekboz.in/');
+  // the .com expense from web days keeps "Domain" when edited
+  await page.goto(SITE + '#/money');
+  await page.click('button.row:has-text(".com")');
+  assert.equal(await page.inputValue('#m-cat'), 'Domain');
+  assert.ok((await page.locator('#m-cat option').allTextContents()).includes('Materials & packaging'));
+  await page.fill('#m-amount', '1100');
+  await page.click('.sheet button[type=submit]');
+  await page.waitForFunction(id => window.__store.rows.txns.find(r => r.id === id).amount === 1100, ids.domain);
+  assert.equal((await rows(page, 'txns')).find(r => r.id === ids.domain).category, 'Domain');
+});
+
+test('choosing the kind of business in Settings changes the words at once and loses nothing', async t => {
+  const page = await open(t, { hash: '#/settings', prepare: withLink });
+  await page.locator('#s-kind').waitFor();
+  assert.equal(await page.inputValue('#s-kind'), 'web_dev');
+  assert.deepEqual(await page.locator('#s-kind option').allTextContents(), ['Web development', 'Products made to order', 'Other services']);
+  assert.deepEqual(await tabs(page), ['Dashboard', 'Projects', 'Clients', 'Money', 'Invoices']);
+  await page.selectOption('#s-kind', 'products');
+  assert.match(await page.locator('#s-kind-note').textContent(), /custom gift boxes.*orders, customers and Enquiry, Making, On hold, Delivered/);
+  const before = await page.evaluate(() => JSON.stringify(['projects', 'clients', 'txns', 'invoices', 'services', 'milestones'].map(t => window.__store.rows[t])));
+  await page.click('button:has-text("Save business details")');
+  await page.locator('[data-section="business"] .saved').waitFor();
+  assert.equal((await rows(page, 'settings')).find(r => r.user_id === OWNER).business_type, 'products');
+  assert.deepEqual(await tabs(page), ['Dashboard', 'Orders', 'Customers', 'Money', 'Invoices']);
+  assert.equal(await page.evaluate(() => JSON.stringify(['projects', 'clients', 'txns', 'invoices', 'services', 'milestones'].map(t => window.__store.rows[t]))), before, 'no data changed');
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  await page.locator('.links a', { hasText: 'Live site' }).waitFor();
+  // and back again: the owner's own words
+  await page.goto(SITE + '#/settings');
+  await page.selectOption('#s-kind', 'web_dev');
+  await page.click('button:has-text("Save business details")');
+  await page.locator('[data-section="business"] .saved').waitFor();
+  assert.deepEqual(await tabs(page), ['Dashboard', 'Projects', 'Clients', 'Money', 'Invoices']);
+  await page.goto(SITE + '#/project/' + ids.gbSite);
+  assert.deepEqual(await page.locator('.facts .l').allTextContents(), ['Started', 'Due', 'Added', 'Currency']);
+  assert.equal(await page.locator('.links .link.none').count(), 2, 'web development shows the empty link slots again');
+});
+
+test('another service business: jobs and clients, its own categories, no web links', async t => {
+  const page = await open(t, { settings: { business_type: 'general' }, prepare: noServices, hash: '#/projects' });
+  await heading(page).filter({ hasText: 'Jobs' }).waitFor();
+  assert.deepEqual(await tabs(page), ['Dashboard', 'Jobs', 'Clients', 'Money', 'Invoices']);
+  await page.click('button:has-text("+ New job")');
+  assert.equal(await page.locator('.sheet h2').textContent(), 'New job');
+  assert.equal(await page.locator('#p-liveUrl').count(), 0);
+  assert.ok((await page.locator('.sheet label').allTextContents()).includes('Quoted price'));
+  await page.click('.sheet button:has-text("Cancel")');
+  await page.goto(SITE + '#/money');
+  await page.click('button:has-text("+ Add money")');
+  await page.click('.seg .out');
+  assert.deepEqual(await page.locator('#m-cat option').allTextContents(), ['Equipment', 'Software & subscriptions', 'Materials', 'Contractor', 'Ads & marketing', 'Travel', 'Other']);
+});
+
+for (const colorScheme of ['light', 'dark']) {
+  test('a gift-box business\'s pages fit a phone screen (' + colorScheme + ')', async t => {
+    const page = await open(t, { viewport: { width: 375, height: 800 }, colorScheme, settings: giftBox, prepare: noServices });
+    for (const hash of ['#/', '#/projects', '#/clients', '#/project/' + ids.gbSite, '#/client/' + ids.geekboz, '#/settings']) {
+      await page.goto(SITE + hash);
+      await page.locator('#view h1').first().waitFor();
+      const [scroll, width] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+      assert.ok(scroll <= width, hash + ' scrolls sideways on a phone (' + scroll + 'px > ' + width + 'px)');
+    }
+  });
+}

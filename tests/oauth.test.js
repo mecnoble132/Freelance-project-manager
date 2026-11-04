@@ -152,6 +152,19 @@ test('a connected app can use the tools, and only sees its own user\'s data', as
   assert.equal(sum.json.result.isError, false);
 });
 
+test('a connected app is told about the user\'s kind of business', async t => {
+  const c = ctx(t);
+  const { INSTRUCTIONS, instructionsFor } = require('../api/_lib/tools');
+  const { tokens } = await connect();
+  const init = async () => (await rpc(tokens.access_token, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } })).json.result.instructions;
+  assert.equal(await init(), INSTRUCTIONS, 'the owner (web development) gets the original instructions');
+  c.store.update('settings', r => r.user_id === OWNER, { business_type: 'products' });
+  assert.equal(await init(), instructionsFor('products'));
+  assert.match(await init(), /custom gift boxes/);
+  c.store.rows.settings = c.store.rows.settings.filter(r => r.user_id !== OWNER); // a new user with no settings yet
+  assert.equal(await init(), INSTRUCTIONS);
+});
+
 test('a connected app is offered the tasks and time tools, and can use them', async t => {
   ctx(t);
   const { tokens } = await connect();

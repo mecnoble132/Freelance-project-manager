@@ -32,7 +32,7 @@ Every table in the [README](../README.md#data) is reachable through these tools.
 | `list_renewals` | Overdue and soon-due renewals, every active service, and yearly revenue, cost and profit from them |
 | `list_tasks` | Tasks across projects (open by default), with due dates and what's overdue |
 | `list_time` | Hours logged, newest first, with totals per project; filter by project, client or period |
-| `get_settings` | Your business details and invoice settings |
+| `get_settings` | Your business details and invoice settings, regional settings, and your kind of business (`businessType`) |
 | `list_recent_changes` | Changes made through the assistant, and whether they were undone |
 
 ## Write tools
@@ -48,7 +48,7 @@ Every table in the [README](../README.md#data) is reachable through these tools.
 | `add_task` / `update_task` / `delete_task` | Add several tasks at once; tick one off, reopen or edit it; delete (two-step) |
 | `log_time` | Log minutes or hours on a project |
 | `log_reminder` | Record that you reminded a client, so the next reminder is firmer |
-| `update_settings` | Change your business details, UPI ID, invoice prefix, payment terms, and your regional settings (default currency, financial year start month, time zone, locale) |
+| `update_settings` | Change your business details, UPI ID, invoice prefix, payment terms, your regional settings (default currency, financial year start month, time zone, locale) and your kind of business (`business_type`: `web_dev`, `products` or `general`) |
 | `update_transaction` / `delete_transactions` | Fix or remove money entries |
 | `undo_change` | Revert the latest change, or any earlier one by its `change_id` |
 
@@ -95,3 +95,12 @@ Also run `supabase/schema.sql` (see the main [README](../README.md#setup)) so th
 
 - **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector → `https://<your-site>/api/mcp`, then sign in when asked.
 - **Claude Code:** `claude mcp add --transport http client-ledger https://<your-site>/api/mcp`, then `/mcp` to sign in.
+
+## Kinds of business
+
+Each person chooses a kind of business in their settings: web development (`web_dev`, the default), products made to order such as custom gift boxes (`products`), or other services (`general`). It changes words, not data:
+
+- **Instructions:** Claude is given instructions for that kind of business when it connects. Web development gets the original text; a gift-box business is told that a project is an order, a client a customer, and which statuses, dates and expense categories mean what.
+- **Expense categories:** each kind has its own list. Expenses must use the person's own list, though an older entry can keep the category it already has. The tool schemas list every kind's categories and say which belong to which.
+- **Status labels:** read tools show statuses in the person's words (for example "Making" and "Delivered"). Write tools accept either those words or the stored values (`lead`, `active`, `paused`, `done`).
+- **Tools:** the tool names and inputs are the same for everyone. Web links (preview, live, GitHub) are for web development.

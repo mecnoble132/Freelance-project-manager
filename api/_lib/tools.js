@@ -1,5 +1,5 @@
 // The MCP tools: what the assistant sees (name, description, input schema) and what each one runs.
-const { load, PERIODS, CATEGORIES, CURRENCIES } = require('./ledger');
+const { load, PERIODS, ALL_CATEGORIES, BUSINESS_TYPES, businessType, CURRENCIES } = require('./ledger');
 const W = require('./writes');
 
 const period = { type: 'string', enum: PERIODS, description: 'Time period. Defaults to all_time. this_fy / last_fy are the user\'s financial years (they choose the start month; April by default). Ignored when from or to is given.' };
@@ -10,6 +10,9 @@ const obj = (properties, required) => ({ type: 'object', properties, ...(require
 const currencyIn = { type: 'string', enum: CURRENCIES, description: 'Which currency to report in. Defaults to the user\'s default currency (or the only one in use). The answer lists any other currencies they have money in.' };
 const confirm = { type: 'boolean', description: 'Leave out first: the tool then only shows what would be deleted. Pass true only after the user has seen that and agreed.' };
 const statusIn = { type: 'string', enum: ['lead', 'active', 'paused', 'done'], description: 'lead, active (in progress), paused (on hold) or done.' };
+// Each kind of business has its own expense categories (get_settings → businessType); the schema lists them all.
+const categoryIn = (extra = '') => ({ type: 'string', enum: ALL_CATEGORIES,
+  description: (extra ? extra + ' ' : '') + 'Use the categories for the user\'s kind of business: ' + Object.values(BUSINESS_TYPES).map(b => b.label.toLowerCase() + ': ' + b.categories.join(', ')).join('; ') + '.' });
 const projectRef = { project: str('Project id, title, or "client title" like "GeekBoz Website".'), client: str('Client name, to pick between projects with the same title.') };
 const projectFieldSchema = {
   status: statusIn,
@@ -17,9 +20,9 @@ const projectFieldSchema = {
   currency: { type: 'string', enum: CURRENCIES, description: 'The project\'s currency. Defaults to the user\'s default currency. It can only be changed while the project has no payments, expenses, invoices, renewals or milestones.' },
   start_date: str('Start date (YYYY-MM-DD). Empty string clears it.'),
   due_date: str('Due date (YYYY-MM-DD). Empty string clears it.'),
-  preview_url: str('Preview / staging link. Empty string clears it.'),
-  live_url: str('Live site link. Empty string clears it.'),
-  github_url: str('GitHub repository or project board link. Empty string clears it.'),
+  preview_url: str('Web development only: preview / staging link. Empty string clears it.'),
+  live_url: str('Web development only: live site link. Empty string clears it.'),
+  github_url: str('Web development only: GitHub repository or project board link. Empty string clears it.'),
   description: str('What the project is: scope, tech stack, notes.')
 };
 const entrySchema = {
@@ -71,7 +74,7 @@ const TOOLS = [
   { name: 'list_transactions', title: 'List payments and expenses', annotations: RO,
     description: 'Payments (money in) and expenses (money out) with their ids, newest first, with totals for what matched. Filter by type, period or dates, client, project and expense category.',
     inputSchema: obj({ type: { type: 'string', enum: ['in', 'out'], description: 'in = payments, out = expenses.' }, period, from: day('Start date, inclusive'), to: day('End date, inclusive'),
-      client: str('Client name, or part of it.'), project: str('Project title, or part of it.'), category: { type: 'string', enum: CATEGORIES },
+      client: str('Client name, or part of it.'), project: str('Project title, or part of it.'), category: categoryIn(),
       limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Defaults to 100.' }, currency: currencyIn }),
     run: read((l, a) => l.listTransactions(a)) },
   { name: 'list_recent_changes', title: 'Recent changes', annotations: RO,
@@ -119,17 +122,17 @@ const TOOLS = [
     inputSchema: obj({ ...entrySchema, invoice: str('Invoice number (or its last part, like "001") this payment is for.') }, ['amount']), run: (db, a) => W.addTransactions(db, [{ ...a, type: 'in' }], 'Logged a payment') },
   { name: 'add_expense', title: 'Log an expense', annotations: WRITE,
     description: 'Records money spent on a client or project, like a domain, hosting or a contractor.',
-    inputSchema: obj({ ...entrySchema, category: { type: 'string', enum: CATEGORIES, description: 'Defaults to a category matching the note, else Other.' } }, ['amount']),
+    inputSchema: obj({ ...entrySchema, category: categoryIn('Defaults to a category matching the note, else Other.') }, ['amount']),
     run: (db, a) => W.addTransactions(db, [{ ...a, type: 'out' }], 'Logged an expense') },
   { name: 'add_transactions', title: 'Log several payments or expenses', annotations: WRITE,
     description: 'Records many payments and expenses at once, e.g. from a pasted list or statement. All are checked first; if any can\'t be matched to a client or project, nothing is saved.',
     inputSchema: obj({ entries: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'object', additionalProperties: false, required: ['type', 'amount'],
-      properties: { type: { type: 'string', enum: ['in', 'out'] }, ...entrySchema, category: { type: 'string', enum: CATEGORIES } } } } }, ['entries']),
+      properties: { type: { type: 'string', enum: ['in', 'out'] }, ...entrySchema, category: categoryIn() } } } }, ['entries']),
     run: (db, a) => W.addTransactions(db, a.entries) },
   { name: 'update_transaction', title: 'Edit a payment or expense', annotations: EDIT,
     description: 'Changes a money entry by id: amount, date, note, type, category, or which client/project it belongs to. Pass project as an empty string to detach it from its project.',
     inputSchema: obj({ id: str('Entry id, from list_transactions or get_project.'), type: { type: 'string', enum: ['in', 'out'] }, amount: entrySchema.amount,
-      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: { type: 'string', enum: CATEGORIES }, client: entrySchema.client, project: entrySchema.project, currency: entrySchema.currency,
+      date: str('Date (YYYY-MM-DD). Empty string clears it.'), note: str('New note.'), category: categoryIn(), client: entrySchema.client, project: entrySchema.project, currency: entrySchema.currency,
       invoice: str('Invoice number this payment is for. Empty string unlinks it, which reopens the invoice.') }, ['id']),
     run: W.updateTransaction },
   { name: 'delete_transactions', title: 'Delete payments or expenses', annotations: DELETE,
@@ -138,10 +141,10 @@ const TOOLS = [
 
   // ---------- invoices ----------
   { name: 'get_settings', title: 'Business details', annotations: RO,
-    description: 'The business details printed on invoices (name, address, phone, email, UPI ID, bank details), the invoice number prefix, payment terms in days, default invoice notes, and the regional settings: default currency, financial year start month, time zone and locale.',
+    description: 'The business details printed on invoices (name, address, phone, email, UPI ID, bank details), the invoice number prefix, payment terms in days, default invoice notes, the regional settings (default currency, financial year start month, time zone and locale) and the kind of business (businessType), which decides the words and expense categories to use.',
     inputSchema: obj({}), run: W.getSettings },
   { name: 'update_settings', title: 'Edit business details', annotations: EDIT,
-    description: 'Changes the business details printed on invoices and the regional settings (default currency, financial year start month, time zone, locale). Only the fields given are changed.',
+    description: 'Changes the business details printed on invoices, the regional settings (default currency, financial year start month, time zone, locale) and the kind of business. Only the fields given are changed.',
     inputSchema: obj({ business_name: str('Name shown at the top of invoices.'), address: str('Postal address.'), phone: str('Phone.'), email: str('Email.'),
       upi_id: str('UPI ID clients pay to, like name@okhdfcbank. Used for the QR code on rupee invoices.'), bank_details: str('Account name, number, IFSC and bank, for bank transfers.'),
       invoice_prefix: str('Start of invoice numbers, like INV (INV/2026-27/001).'), payment_terms_days: { type: 'integer', minimum: 0, maximum: 365, description: 'Days until an invoice is due.' },
@@ -149,7 +152,8 @@ const TOOLS = [
       default_currency: { type: 'string', enum: CURRENCIES, description: 'Currency for new projects and for money without a project.' },
       fy_start_month: { type: 'integer', minimum: 1, maximum: 12, description: 'Month the financial year starts: 1 = January (the calendar year), 4 = April.' },
       timezone: str('IANA time zone, like Asia/Kolkata, Europe/London or America/New_York. Decides what "today" is.'),
-      locale: { type: 'string', enum: ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'], description: 'How numbers and dates are written.' } }),
+      locale: { type: 'string', enum: ['en-IN', 'en-US', 'en-GB', 'en-AU', 'en-CA'], description: 'How numbers and dates are written.' },
+      business_type: { type: 'string', enum: Object.keys(BUSINESS_TYPES), description: 'The kind of business: ' + Object.entries(BUSINESS_TYPES).map(([k, b]) => k + ' (' + b.label.toLowerCase() + ')').join(', ') + '. Changes the words and expense categories; no data changes.' } }),
     run: W.updateSettings },
   { name: 'create_invoice', title: 'Create an invoice', annotations: WRITE,
     description: 'Creates an invoice for a client, numbered automatically (like INV/2026-27/001, restarting each financial year). Either invoice a project milestone (its unpaid amount) or give line items. The invoice is in its project\'s currency (or the one given, or the user\'s default when there is no project). It starts as a draft unless mark_sent is true. No tax is added.',
@@ -241,7 +245,19 @@ const TOOLS = [
     inputSchema: obj({ change_id: str('From a tool result or list_recent_changes. Leave out to undo the latest change.') }), run: W.undoChange }
 ];
 
-const INSTRUCTIONS = `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense. Every project, payment, expense, invoice and renewal has its own currency (INR, USD, EUR, GBP, AUD, CAD, SGD, AED, NZD, CHF, JPY or ZAR); a project's money is always in the project's currency. Amounts in different currencies are never added together: the money tools report one currency at a time (the \`currency\` input, else the user's default) and list any other currencies in otherCurrencies, so mention them to the user. Dates are YYYY-MM-DD in the user's own time zone.
+// What Claude is told about the ledger, for the user's kind of business. Web development is the original text, word for word.
+const INTRO = {
+  web_dev: `Client Ledger: a freelance web developer's clients, web projects (status, description, preview/live/GitHub links, quoted price, dates) and every payment and expense.`,
+  products: `Client Ledger: a small business that makes and sells products to order (like custom gift boxes): its customers, orders and every payment and expense.`,
+  general: `Client Ledger: a small service business's clients, jobs and every payment and expense.`
+};
+// For kinds other than web development: the tools' words mapped to the user's.
+function wordsFor(k) {
+  const b = BUSINESS_TYPES[k], s = b.statuses, d = b.dates;
+  return `\nThe user calls a project ${a(b.project[0])} and a client ${a(b.client[0])}; the tools still say project and client, but use the user's words when you talk to them. Statuses: lead = ${s.lead}, active = ${s.active}, paused = ${s.paused}, done = ${s.done}. A project's start_date is its ${d.start.toLowerCase()}, due_date its ${d.due.toLowerCase()} and quoted its ${d.quoted.toLowerCase()}. Expense categories: ${b.categories.join(', ')}. Projects have no web links (preview, live, GitHub) here.`;
+}
+const a = w => (/^[aeiou]/.test(w) ? 'an ' : 'a ') + w;
+const REST = ` Every project, payment, expense, invoice and renewal has its own currency (INR, USD, EUR, GBP, AUD, CAD, SGD, AED, NZD, CHF, JPY or ZAR); a project's money is always in the project's currency. Amounts in different currencies are never added together: the money tools report one currency at a time (the \`currency\` input, else the user's default) and list any other currencies in otherCurrencies, so mention them to the user. Dates are YYYY-MM-DD in the user's own time zone.
 Reading: "still to collect" is quoted price minus money received, for projects that aren't leads. A project's price can be split into payment milestones; its money received covers them in order, so each is paid, part-paid, unpaid or overdue (past its due date and not fully paid). Some older entries have no date; they only count under all_time.
 The financial year starts on the first of a month the user chose in their settings (April by default: FY 2026–27 is 2026-04-01 to 2027-03-31; January means the calendar year, FY 2026). When the user says "this year" about money, taxes or how the business did, they usually mean the financial year: use this_fy / last_fy, and say which you used.
 Invoices: numbered like INV/2026-27/001 per financial year (INV/2026/001 for a January start), never deleted (cancel instead). A payment linked to an invoice (add_payment with invoice) counts towards it; an invoice is paid when those reach its total, and overdue when past its due date and not paid. No tax (GST or TDS) is used yet. To chase money, use list_overdue and draft_payment_reminder, write the message yourself for the user to send, then log_reminder once they have sent it. This server never sends messages.
@@ -253,6 +269,14 @@ Changing data:
 - If a client isn't found, don't guess: check the spelling with the user before creating a new one (create_project with new_client: true).
 - Deletes are two-step: call without confirm to get a preview, show it to the user, and only call again with confirm: true after they agree.
 - Every change returns a change_id. Tell the user what was saved; undo_change reverts it. Changes show up on the website the next time it's loaded.`;
+function instructionsFor(kind) {
+  const k = businessType(kind);
+  let rest = REST;
+  if (k !== 'web_dev') rest = rest.replace(/\nRenewals: [^\n]*/, '\nRenewals: services that renew on a monthly, quarterly or yearly cycle (list_renewals, add_service, renew_service). This business rarely has any.')
+    .replace('(many are called "Website")', '(many have the same name)');
+  return INTRO[k] + (k === 'web_dev' ? '' : wordsFor(k)) + rest;
+}
+const INSTRUCTIONS = instructionsFor('web_dev');
 
 // Ready-made requests the user can pick in Claude.
 const PROMPTS = [
@@ -262,4 +286,4 @@ const PROMPTS = [
     text: 'Give me my weekly review using the Client Ledger tools: get_summary for this_month and this_fy, compare_periods with month_vs_last_month, get_attention_items and list_overdue. Cover money in and out, overdue invoices and milestones, milestones and projects due this week, open leads, and missing information. Finish with the three most useful things to do this week.' }
 ];
 
-module.exports = { TOOLS, INSTRUCTIONS, PROMPTS };
+module.exports = { TOOLS, INSTRUCTIONS, PROMPTS, instructionsFor };

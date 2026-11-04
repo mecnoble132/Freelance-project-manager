@@ -2,13 +2,19 @@
 // Every request needs an OAuth access token from /api/oauth; the token says whose data to use.
 const { verify, baseUrl, cors, json, logRequest } = require('./_lib/oauth');
 const { forUser } = require('./_lib/supabase');
-const { TOOLS, INSTRUCTIONS, PROMPTS } = require('./_lib/tools');
+const { TOOLS, INSTRUCTIONS, PROMPTS, instructionsFor } = require('./_lib/tools');
 const { Invalid } = require('./_lib/writes');
 
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 const ok = (id, result) => ({ jsonrpc: '2.0', id, result });
 const err = (id, code, message) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
 const text = (data, isError) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 1) }], structuredContent: data, isError });
+// The instructions are written for the user's kind of business (gift boxes get "orders" and "customers"). If their settings
+// can't be read, the web development text is a safe fallback: every tool still works.
+async function instructions(db) {
+  try { const [st] = await db.select('settings'); return instructionsFor(st && st.business_type); }
+  catch (e) { console.warn('[mcp] settings not read for the instructions:', e.message); return INSTRUCTIONS; }
+}
 
 async function handle(msg, db) {
   if (!msg || msg.jsonrpc !== '2.0' || typeof msg.method !== 'string') return err(msg && msg.id, -32600, 'Invalid request');
@@ -20,7 +26,7 @@ async function handle(msg, db) {
         protocolVersion: VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : VERSIONS[1],
         capabilities: { tools: { listChanged: false }, prompts: { listChanged: false } },
         serverInfo: { name: 'client-ledger', title: 'Client Ledger', version: '2.0.0' },
-        instructions: INSTRUCTIONS
+        instructions: await instructions(db)
       });
     case 'ping': return ok(id, {});
     case 'tools/list': return ok(id, { tools: TOOLS.map(({ run, ...t }) => t) });

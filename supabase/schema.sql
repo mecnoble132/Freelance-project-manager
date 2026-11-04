@@ -310,3 +310,10 @@ revoke execute on function public.require_invited_email() from public, anon, aut
 drop trigger if exists require_invited_email on auth.users;
 create trigger require_invited_email before insert on auth.users
   for each row execute function public.require_invited_email();
+
+-- Kind of business per user (family plan, step 4): changes the words, status labels, expense categories and which
+-- web-only parts are shown, never the data. The default is web development, which is how the app has always worked.
+-- Keep the list identical to BUSINESS_TYPES in api/_lib/ledger.js and index.html.
+alter table public.settings add column if not exists business_type text not null default 'web_dev';
+alter table public.settings drop constraint if exists settings_business_type_check;
+alter table public.settings add constraint settings_business_type_check check (business_type in ('web_dev', 'products', 'general'));
