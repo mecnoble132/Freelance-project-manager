@@ -236,7 +236,7 @@ class Ledger {
     return {
       quoted: p.quoted, received: s.revenue, spent: s.spending, profit: s.profit,
       stillToCollect: p.status === 'lead' ? 0 : round(Math.max(0, p.quoted - s.revenue)),
-      percentPaid: p.quoted ? Math.round(Math.min(100, s.revenue / p.quoted * 100)) : null
+      percentPaid: p.quoted ? Math.round(s.revenue / p.quoted * 100) : null // over 100 when more came in than was agreed
     };
   }
 

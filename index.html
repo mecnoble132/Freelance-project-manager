@@ -632,7 +632,7 @@ const viewPills = (key,pk) => h('div',{class:'pills view-pills',role:'group','ar
 const quietly = fn => fn().catch(e=>console.warn(e));
 
 function projectCard(p){
-  const s=projStats(p), pct = s.quoted ? Math.min(100,s.earned/s.quoted*100) : 0;
+  const s=projStats(p), paid = s.quoted ? s.earned/s.quoted*100 : 0, pct = Math.min(100,paid); // the bar is full at 100%; the label says how much more came in
   const links = LINKS.filter(([k])=>p[k]).map(([k,l,ic])=>linkEl(p[k],l,ic,true));
   return h('a',{class:'pcard',href:hrefOf({name:'project',id:p.id})},
     h('div',{class:'ptop'},h('div',{class:'grow'},h('h3',null,p.name),h('div',{class:'sub'},clientName(p.clientId))),badge(p.status)),
@@ -640,7 +640,7 @@ function projectCard(p){
     links.length ? h('div',{class:'links'},links) : null,
     s.quoted ? h('div',null,
       h('div',{class:'sub',style:'margin-bottom:4px'},rs(s.earned,s.cur)+' of '+rs(s.quoted,s.cur)+' paid'+(s.due?' · '+rs(s.due,s.cur)+' left':'')),
-      h('div',{class:'progress',role:'img','aria-label':Math.round(pct)+'% paid'},h('span',{style:'width:'+pct+'%'}))) : null,
+      h('div',{class:'progress',role:'img','aria-label':Math.round(paid)+'% paid'},h('span',{style:'width:'+pct+'%'}))) : null,
     s.overdue ? h('div',{class:'overdue-note'},rs(s.overdue,s.cur)+' overdue') : null,
     h('div',{class:'mini'},
       h('div',null,h('span',{class:'l'},'Received'),h('span',{class:'num'},rs(s.earned,s.cur))),
@@ -701,7 +701,7 @@ function renderProject(v,id){
         h('button',{class:'btn primary',onclick:()=>openMoneySheet({clientId:p.clientId,projectId:p.id})},'+ Add money')):null),
     h('div',{class:'kpis'},
       kpi(dt.quoted, s.quoted?rs(s.quoted,s.cur):'—', s.quoted?'Agreed price':'No price set'),
-      kpi('Received', rs(s.earned,s.cur), s.quoted?Math.round(Math.min(100,s.earned/s.quoted*100))+'% of '+quoteWord():'Money in','in'),
+      kpi('Received', rs(s.earned,s.cur), s.quoted?Math.round(s.earned/s.quoted*100)+'% of '+quoteWord():'Money in','in'),
       kpi('Spent', rs(s.spent,s.cur), 'Money out','out'),
       kpi('Profit', signed(s.profit,s.cur), s.earned>0?Math.round(s.profit/s.earned*100)+'% margin':'Received − spent', s.profit<0?'out':''),
       kpi('Still to collect', rs(s.due,s.cur), p.status==='lead'?statusLabel('lead')+' — not owed yet':s.overdue?rs(s.overdue,s.cur)+' overdue':dt.quoted+' − received'),
@@ -739,6 +739,9 @@ function milestonesCard(p){
       h('div',{class:'sub'},[m.dueDate?'Due '+fmtDate(m.dueDate):'No due date', m.state==='part-paid'||m.state==='overdue'&&m.paid?rs(m.paid,p.currency)+' of '+rs(m.amount,p.currency)+' paid':null].filter(Boolean).join(' · '))),
     h('div',{class:'right'},h('span',{class:'num'},rs(m.amount,p.currency)),h('span',{class:'state '+m.state},MS_STATES[m.state]),milestoneInvoice(p,m))))));
   if(p.quoted && cents(total)!==cents(p.quoted)) card.appendChild(h('div',{class:'hint'},'The milestones add up to '+ex(total,p.currency)+', but the '+quoteWord()+' is '+ex(p.quoted,p.currency)+'.'));
+  // Milestones split the price, so with no price there's nothing to collect. Offer their total as the price.
+  if(!p.quoted && total>0) card.appendChild(h('div',{class:'notice',id:'no-price'},'This '+words().p+' has no '+priceWord()+', so nothing shows as still to collect. ',
+    canWrite()?h('button',{class:'linkbtn',type:'button',onclick:()=>quietly(()=>api.update('projects',p.id,{quoted:cents(total)}))},'Use '+ex(total,p.currency)+' as the '+priceWord()):null));
   return card;
 }
 
@@ -965,9 +968,9 @@ function openProjectSheet(pre={}){
   const desc=h('textarea',{id:'p-desc',placeholder:eg('desc')}); desc.value=p?p.description:'';
   sheet(editing?'Edit '+w.p:'New '+w.p,[
     field('p-name',w.P+' title',title),
+    field('p-quoted',cap(priceWord()),quoted,'What the '+w.c+' agreed to pay, in the '+w.p+'’s currency'),
     h('div',{class:'field'},h('label',{for:'p-client'},w.C),client.sel,client.box),
     h('div',{class:'two'},field('p-status','Status',status),field('p-cur','Currency',cur,attached?'Fixed: it already has payments, invoices, renewals or milestones in '+p.currency+'.':'Every payment and invoice on this '+w.p+' is in it.')),
-    field('p-quoted',cap(priceWord()),quoted,'What the '+w.c+' agreed to pay, in the '+w.p+'’s currency'),
     h('div',{class:'two'},field('p-start',dt.start,start),field('p-due',dt.due,due)),
     withLinks ? h('div',{class:'three'},LINKS.map(([k,l],i)=>field('p-'+k,l+' link',urls[i]))) : null, // web links are kept, just not shown, for other kinds of business
     field('p-desc','Description',desc)
@@ -1035,7 +1038,7 @@ function openMilestonesSheet(p){
     h('div',{class:'splits',role:'group','aria-label':'Quick splits'},
       [['50 / 50',[50,50]],['50 / 30 / 20',[50,30,20]]].map(([l,parts])=>h('button',{class:'btn small',type:'button',disabled:!quote,onclick:()=>split(parts)},l)),
       h('button',{class:'btn small',type:'button',onclick:()=>custom().amt.focus()},'Custom')),
-    quote?null:h('div',{class:'hint'},'Set '+an(priceWord())+' on the '+words().p+' to use the quick splits and have the last milestone fill in the rest.'),
+    quote?null:h('div',{class:'hint'},'Set '+an(priceWord())+' on the '+words().p+' to use the quick splits and have the last milestone fill in the rest. With no '+priceWord()+', saving makes the milestones’ total its '+priceWord()+'.'),
     box,
     h('button',{class:'linkbtn',type:'button',onclick:()=>{ const r=addRow(); sync(); r.amt.focus(); }},'+ Add milestone'),
     total
@@ -1045,6 +1048,7 @@ function openMilestonesSheet(p){
       if(!(amount>0)) return fail('Milestone '+(rows.indexOf(r)+1)+' needs an amount above '+ex(0,cu)+'.');
       list.push({project_id:p.id, name:r.name.value.trim()||msName(i,keep.length), amount, due_date:r.due.value||null, sort_order:i}); }
     await api.replaceMilestones(old.map(m=>m.id), list);
+    if(!quote && list.length) await api.update('projects',p.id,{quoted:cents(list.reduce((a,m)=>a+m.amount,0))}); // same as set_milestones in writes.js
   }, 'Save milestones', {noFocus:true});
 }
 

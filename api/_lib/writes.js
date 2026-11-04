@@ -349,14 +349,17 @@ async function setMilestones(db, a) {
   const old = L.raw.milestones.filter(m => m.project_id === p.id);
   if (!list.length && !old.length) return { error: label + ' has no milestones to remove.' };
   const total = round(list.reduce((x, m) => x + m.amount, 0));
+  // Milestones split the price. A project with no price yet takes their total as its price, so still to collect is right.
+  const setsPrice = !quoted && list.length > 0;
   const ch = new Change(db, (list.length ? 'Set ' + list.length + ' milestones on ' : 'Removed the milestones from ') + label); await ch.ready();
+  if (setsPrice) await ch.update('projects', p, { quoted: total });
   for (const i of L.raw.invoices.filter(i => old.some(m => m.id === i.milestone_id))) await ch.update('invoices', i, { milestone_id: null });
   for (const m of old) await ch.remove('milestones', m);
   const rows = list.length ? await ch.insert('milestones', list.map((m, i) => ({ project_id: p.id, name: m.name, amount: m.amount, due_date: m.due_date, sort_order: i }))) : [];
   const now = new Ledger(L.raw.clients, L.raw.projects, L.raw.txns, L.raw.milestones.filter(m => m.project_id !== p.id).concat(rows));
   const cur = r.project.currency;
-  return done(list.length ? 'Set ' + list.length + ' milestones on ' + label + ', totalling ' + L.fmt(total, cur) + '.' : 'Removed the milestones from ' + label + '.',
-    { project: label, milestones: now.milestones(now.project(p.id)),
+  return done(list.length ? 'Set ' + list.length + ' milestones on ' + label + ', totalling ' + L.fmt(total, cur) + '.' + (setsPrice ? ' It had no price, so its price is now ' + L.fmt(total, cur) + ' (the milestones\' total).' : '') : 'Removed the milestones from ' + label + '.',
+    { project: label, milestones: now.milestones(now.project(p.id)), quoted: setsPrice ? total : undefined,
       warning: list.length && quoted && total !== quoted ? 'The milestones add up to ' + L.fmt(total, cur) + ', but the quote is ' + L.fmt(quoted, cur) + '. Tell the user.' : undefined }, await ch.commit());
 }
 
