@@ -132,6 +132,7 @@ A new per-person setting, `settings.business_type`, picks a **preset** that chan
 | A project is called | Project | Order | Job |
 | A client is called | Client | Customer | Client |
 | Status labels (stored values stay `lead/active/paused/done`) | Lead, In progress, On hold, Done | Enquiry, Making, On hold, Delivered | Enquiry, In progress, On hold, Done |
+| Date and price labels (stored in `start_date`, `due_date`, `quoted`) | Start date, Due date, Quoted (unchanged) | Order date, Delivery date, Price | Start date, Due date, Quoted |
 | Project links (Preview, Live site, GitHub) | shown | hidden | hidden |
 | Renewals tab and dashboard card | shown | hidden unless the person already has a service | hidden unless the person already has a service |
 | Expense categories | Domain, Hosting, Software & plugins, Design assets, Contractor, Ads & marketing, Travel, Other (unchanged) | Materials & packaging, Products & stock, Printing & labels, Shipping & delivery, Platform & payment fees, Ads & marketing, Travel, Other | Equipment, Software & subscriptions, Materials, Contractor, Ads & marketing, Travel, Other |
@@ -139,6 +140,7 @@ A new per-person setting, `settings.business_type`, picks a **preset** that chan
 
 Notes:
 
+- The date and price labels apply everywhere those fields appear: the order form, the order page and cards, the dashboard's "due soon" list, and the wording Claude is given ("delivery date" for `products`). Tool input names (`start_date`, `due_date`, `quoted`) stay the same.
 - Only **labels** change for statuses, so the five status lists and the `projects_status_check` constraint stay as they are.
 - Expense categories are free text in the database (`txns.category text not null default ''`), so **no schema change** is needed for them. Old entries keep their category even if it is not in the person's current list; forms and filters must still show it (add it to the dropdown when editing such an entry).
 - Hiding something never deletes data. If a `products` person switches to `web_dev`, their data is all still there.
@@ -162,6 +164,8 @@ Notes:
 
 ### 5.4 Out of scope for step 4 (ask the owner first)
 
+**Decided against (2026-11-04): a one-step "Record a sale" form.** A sale is recorded by creating the order (a new customer can be added in the same form) and then recording its payment. Do not build a shortcut unless the owner asks.
+
 A gift-box business may later want **a product catalogue** (named boxes with a standard price), **stock of materials** (how many boxes and ribbons are left), **delivery addresses and dates**, or **GST on invoices**. None of these exist today and none are part of this plan. If the gift-box family member asks for one, add it as its own step with its own tests.
 
 ---
@@ -176,7 +180,7 @@ Do: section 5.
 Tests:
 - Consistency: `BUSINESS_TYPES` identical in `index.html` and `ledger.js`; the schema check lists the same keys.
 - Server: `products` user's expense with "Materials & packaging" accepted, "Hosting" refused with a message listing the right categories; updating an old entry that keeps a category outside the list is accepted; `get_settings` / `update_settings` round-trip `business_type` with undo; `initialize` sends gift-box instructions for a `products` user and today's exact text for the owner.
-- Website: a `products` user sees "Orders" and "Customers", Enquiry/Making/Delivered, no link fields and no Renewals tab; a `products` user who has a service still sees Renewals; switching the setting changes the words without losing data; the owner (`web_dev`) sees no change (existing tests pass unmodified); phone width, light and dark.
+- Website: a `products` user sees "Orders" and "Customers", Enquiry/Making/Delivered, "Order date", "Delivery date" and "Price" on the order form and page, no link fields and no Renewals tab; a `products` user who has a service still sees Renewals; switching the setting changes the words without losing data; the owner (`web_dev`) sees no change (existing tests pass unmodified); phone width, light and dark.
 Done when: all of the above pass.
 
 ### Step 5 — Cross-user safety and live checks
