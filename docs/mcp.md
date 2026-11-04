@@ -41,7 +41,7 @@ Every table in the [README](../README.md#data) is reachable through these tools.
 |---|---|
 | `create_client` / `update_client` / `delete_client` | Add, edit or delete a client (deleting also removes their projects and money) |
 | `create_project` / `update_project` / `delete_project` | Add a project (with a new client if needed), change any field or move it to another client, or delete it |
-| `set_milestones` | Replace a project's payment milestones, from a split like `[50, 30, 20]` or a list with amounts and due dates |
+| `set_milestones` | Replace a project's payment milestones, from a split like `[50, 30, 20]` or a list with amounts and due dates. On a project with no price, the milestones' total becomes its price (in the same change, so one undo reverses both) |
 | `add_payment` / `add_expense` / `add_transactions` | Log money in or out, one at a time or many at once. A payment can be for an invoice |
 | `create_invoice` / `update_invoice` | Invoice a milestone or line items; mark sent, edit, or cancel (never delete) |
 | `add_service` / `update_service` / `renew_service` | Track a renewal; edit or stop it; renew it (cost, invoice and next date in one change, two-step) |

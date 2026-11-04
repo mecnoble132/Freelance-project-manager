@@ -1441,3 +1441,51 @@ for (const colorScheme of ['light', 'dark']) {
     }
   });
 }
+
+// ---------- prices and milestones (after the gift-box trial) ----------
+const noPrice = store => store.update('projects', r => r.id === ids.gbSite, { quoted: 0 });
+
+test('an order with milestones but no price says so, and one tap uses their total as the price', async t => {
+  const page = await open(t, { settings: giftBox, prepare: noPrice, hash: '#/project/' + ids.gbSite });
+  await page.locator('#no-price').waitFor();
+  assert.match(await page.locator('#no-price').textContent(), /This order has no price, so nothing shows as still to collect\./);
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '₹0');
+  await page.click('#no-price button:has-text("Use ₹50,000 as the price")');
+  await page.waitForFunction(id => Number(window.__store.rows.projects.find(r => r.id === id).quoted) === 50000, ids.gbSite);
+  assert.equal(await kpi(page, 'Price').textContent(), '₹50,000');
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '₹30,000');
+  assert.equal(await page.locator('#no-price').count(), 0);
+});
+
+test('saving milestones on an order with no price makes their total the price', async t => {
+  // a new order: no milestones, payments or invoices yet
+  const page = await open(t, { settings: giftBox, prepare: store => { noPrice(store); for (const t of ['milestones', 'txns', 'invoices']) store.rows[t] = store.rows[t].filter(m => m.project_id !== ids.gbSite); }, hash: '#/project/' + ids.gbSite });
+  await page.click('button:has-text("Set up milestones")');
+  assert.match(await page.locator('.sheet').textContent(), /With no price, saving makes the milestones’ total its price\./);
+  const amounts = page.locator('.msrow input[type=number]');
+  await amounts.nth(0).fill('3000');
+  await page.click('.sheet button:has-text("+ Add milestone")');
+  await amounts.nth(1).fill('2000');
+  await page.click('.sheet button[type=submit]');
+  await page.waitForFunction(id => Number(window.__store.rows.projects.find(r => r.id === id).quoted) === 5000, ids.gbSite);
+  assert.equal(await kpi(page, 'Still to collect').textContent(), '₹5,000');
+});
+
+test('money received over the price shows the real percentage, above 100%', async t => {
+  const page = await open(t, { settings: giftBox, hash: '#/project/' + ids.gbSite,
+    prepare: store => store.insert('txns', { client_id: ids.geekboz, project_id: ids.gbSite, type: 'in', amount: 40000, note: 'Extra boxes', date: '2026-10-20' }, OWNER) });
+  const received = page.locator('.kpi').filter({ has: page.locator('.eyebrow', { hasText: /^Received$/ }) });
+  await received.waitFor();
+  assert.equal(await received.locator('.v').textContent(), '₹60,000');
+  assert.equal(await received.locator('.s').textContent(), '120% of price');
+  await page.goto(SITE + '#/projects');
+  const bar = page.locator('.pcard', { hasText: 'Website' }).filter({ hasText: 'GeekBoz' }).locator('.progress');
+  assert.equal(await bar.getAttribute('aria-label'), '120% paid');
+  assert.equal(await bar.locator('span').evaluate(el => el.style.width), '100%', 'the bar itself stops at full');
+});
+
+test('the price comes right after the title in the order form', async t => {
+  const page = await open(t, { settings: giftBox, hash: '#/projects' });
+  await page.click('button:has-text("+ New order")');
+  assert.deepEqual((await page.locator('.sheet label').allTextContents()).slice(0, 3), ['Order title', 'Price', 'Customer']);
+});
